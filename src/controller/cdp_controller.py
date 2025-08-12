@@ -28,13 +28,17 @@ class CDPController:
         将一个结构化的事件放入输出队列。
         """
         try:
+            # 获取发起请求的页面的URL
+            initiator_url = request.frame.page.url
+
             event = {
                 'event_type': 'request',
                 'method': request.method,
                 'url': request.url,
                 'headers': await request.all_headers(),
                 'post_data': request.post_data_buffer.hex() if request.post_data_buffer else None,
-                'resource_type': request.resource_type
+                'resource_type': request.resource_type,
+                'initiator_url': initiator_url
             }
             await self.output_q.put(event)
             self.logger.info(f"已捕获请求: {event['method']} {event['url']}")

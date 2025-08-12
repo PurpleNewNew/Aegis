@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 import aiofiles
+import os
 from asyncio import Queue
 
 class JsonlReaderWorker:
@@ -33,7 +34,7 @@ class JsonlReaderWorker:
         # 写入器worker将会创建它。
         while not asyncio.get_event_loop().is_closed():
             try:
-                if await aiofiles.os.path.exists(self.file_path):
+                if os.path.exists(self.file_path):
                     break
                 self.logger.info(f"正在等待捕获文件 '{self.file_path}' 被创建...")
                 await asyncio.sleep(2)

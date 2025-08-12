@@ -47,16 +47,27 @@ class FilterWorker:
         else:
             self.logger.info(f"扫描器范围已限定为: {self.whitelist_domains}")
 
-    def is_in_scope(self, url: str) -> bool:
-        """检查请求的URL是否在白名单域名范围内。"""
+    def is_in_scope(self, request_url: str, initiator_url: str) -> bool:
+        """检查请求或其发起者是否在白名单域名/IP范围内。"""
         if not self.whitelist_domains:
             return False
-        try:
-            domain = urlparse(url).netloc
-            # 检查域名是否匹配或是任何白名单域名的子域名
-            return any(domain == whitelisted_domain or domain.endswith('.' + whitelisted_domain) for whitelisted_domain in self.whitelist_domains)
-        except Exception:
-            return False
+        
+        urls_to_check = {request_url, initiator_url}
+        
+        for url in urls_to_check:
+            if not url:
+                continue
+            try:
+                hostname = urlparse(url).hostname
+                if not hostname:
+                    continue
+                # 检查主机名是否完全匹配，或是任何白名单域名的子域名
+                if any(hostname == whitelisted_domain or hostname.endswith('.' + whitelisted_domain) for whitelisted_domain in self.whitelist_domains):
+                    return True # 只要有一个匹配就放行
+            except Exception:
+                continue # 解析URL失败则跳过
+        
+        return False
 
     async def run(self):
         """
@@ -66,24 +77,25 @@ class FilterWorker:
         try:
             while True:
                 event = await self.input_q.get()
-                url = event.get('url', '')
+                request_url = event.get('url', '')
+                initiator_url = event.get('initiator_url', '')
 
-                # 1. 白名单检查
-                if not self.is_in_scope(url):
-                    self.logger.debug(f"丢弃范围之外的请求: {url}")
+                # 1. 上下文感知的白名单检查
+                if not self.is_in_scope(request_url, initiator_url):
+                    self.logger.debug(f"丢弃范围之外的请求: {request_url} (发起者: {initiator_url})")
                     self.input_q.task_done()
                     continue
 
                 # 2. 静态资源检查 (基于资源类型)
                 resource_type = event.get('resource_type')
                 if resource_type in self.BLOCKED_RESOURCE_TYPES:
-                    self.logger.info(f"按类型 '{resource_type}' 丢弃静态资源: {url}")
+                    self.logger.info(f"按类型 '{resource_type}' 丢弃静态资源: {request_url}")
                     self.input_q.task_done()
                     continue
 
                 # 3. 静态资源检查 (基于文件扩展名，作为后备方案)
-                if any(url.lower().endswith(ext) for ext in self.STATIC_EXTENSIONS):
-                    self.logger.info(f"按扩展名丢弃静态资源: {url}")
+                if any(request_url.lower().endswith(ext) for ext in self.STATIC_EXTENSIONS):
+                    self.logger.info(f"按扩展名丢弃静态资源: {request_url}")
                     self.input_q.task_done()
                     continue
 
@@ -97,7 +109,7 @@ class FilterWorker:
                     'resource_type': resource_type
                 }
                 await self.output_q.put(refined_context)
-                self.logger.info(f"请求已通过并送去分析: {url}")
+                self.logger.info(f"请求已通过并送去分析: {request_url}")
                 
                 self.input_q.task_done()
 

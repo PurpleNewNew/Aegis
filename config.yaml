@@ -7,10 +7,10 @@ browser:
   remote_debugging_port: 9222
 
 scanner_scope:
-  # 重要：只有在此列表中的域名才会被分析。
-  # 在这里添加你的目标应用的域名。
-  # 示例: ["example.com", "api.example.com"]
-  whitelist_domains: []
+  # 重要：只有在此列表中的域名/IP才会被分析。
+  # 在这里添加你的目标应用的域名/IP。
+  # 示例: ["example.com", "api.example.com", "127.0.0.1"]
+  whitelist_domains: ["127.0.0.1"]
 
 ollama:
   # Ollama服务的主机地址。
@@ -18,7 +18,7 @@ ollama:
   # 用于分析的模型名称。
   model: 'gemma3:12b-it-qat'
   # API调用的超时时间（秒）。
-  timeout: 60
+  timeout: 3000
 
 chromadb:
   # 存储向量数据库文件的路径。

@@ -13,6 +13,13 @@ async def log_ai_dialogue(prompt: str, response: str, log_file_path: str):
         log_file_path: .jsonl日志文件的路径。
     """
     logger = logging.getLogger("AILogger")
+    # --- 实时打印到控制台 ---
+    print("\n" + "-" * 25 + " AI 对话开始 " + "-" * 25)
+    print(f"[🤖 PROMPT] -> 发送给AI的提示 (部分):\n{prompt[:400]}...\n")
+    print(f"[🧠 RESPONSE] <- 来自AI的回复:\n{response}\n")
+    print("-" * 27 + " AI 对话结束 " + "-" * 27 + "\n")
+
+    # --- 写入到日志文件 ---
     try:
         log_entry = {
             'timestamp': datetime.now().isoformat(),
