@@ -1,0 +1,65 @@
+graph TB
+    %% Main Application Boundary
+    subgraph "Aegis-CLI Application (本地Python应用)"
+        direction TB
+
+        %% 1. Entry Point & Data Ingestion
+        Controller[<b>CDP Controller</b><br/>数据采集器]
+
+        %% 2. Queues & Workers Pipeline
+        Q1[① 原始事件队列]
+        FilterWorker[<b>Filter & Prune Worker</b><br/>筛选与剪枝]
+        Q2[② 精炼上下文队列]
+        Dispatcher[<b>Dispatcher</b><br/>智能调度员]
+
+        subgraph "并行分析核心"
+            direction LR
+            subgraph "软漏洞分析"
+                Q_Soft[③-a Soft Queue] --> AI_Soft[AI Worker - Soft]
+            end
+            subgraph "逆向分析"
+                Q_Reverse[③-b Reverse Queue] --> AI_Reverse[AI Worker - Reverse]
+            end
+        end
+
+        Q_Final[④ 最终结果队列]
+
+        subgraph "并行最终处理"
+            direction LR
+            ReporterWorker[<b>Reporter Worker</b><br/>报告生成]
+            MemoryWorker[<b>Memory Worker</b><br/>记忆沉淀]
+        end
+
+        %% Internal Data Flow
+        Controller --> Q1
+        Q1 --> FilterWorker
+        FilterWorker --> Q2
+        Q2 --> Dispatcher
+        Dispatcher --> Q_Soft
+        Dispatcher --> Q_Reverse
+        AI_Soft --> Q_Final
+        AI_Reverse --> Q_Final
+        Q_Final --> ReporterWorker
+        Q_Final --> MemoryWorker
+    end
+
+    %% External Interactions (Arrows clearly connecting to specific components)
+    User[👤<br/>用户] -- "1. 运行CLI指令" --> Controller
+    Browser(🌐<br/>Chrome浏览器) -- "2. 发送CDP事件流" --> Controller
+
+    AI_Soft -- "5a. RAG读/LLM推理" --> LLM_VDB
+    AI_Reverse -- "5b. RAG读/LLM推理" --> LLM_VDB
+
+    subgraph "外部服务"
+        LLM_VDB[LLM服务 (Ollama/GPT)<br/>&<br/>向量数据库 (ChromaDB)]
+    end
+
+    MemoryWorker -- "6. 写入新知识" --> LLM_VDB
+
+    ReporterWorker -- "7. 输出报告" --> FileSystem(📄<br/>./reports)
+
+    %% Styling
+    classDef internal fill:#D6EAF8,stroke:#5DADE2
+    classDef external fill:#D5F5E3,stroke:#58D68D
+    class Controller,FilterWorker,Dispatcher,AI_Soft,AI_Reverse,ReporterWorker,MemoryWorker,Q1,Q2,Q_Soft,Q_Reverse,Q_Final internal
+    class User,Browser,LLM_VDB,FileSystem external

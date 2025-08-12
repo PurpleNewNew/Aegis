@@ -1,0 +1,27 @@
+# Aegis Scanner Configuration
+
+browser:
+  # The remote debugging port for the Chrome instance you will launch.
+  # Example launch command for Chrome:
+  # "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+  remote_debugging_port: 9222
+
+ollama:
+  # The host for the Ollama service.
+  host: 'http://localhost:11434'
+  # The model to use for analysis.
+  model: 'gemma3:12b-it-qat'
+  # Timeout for the API calls in seconds.
+  timeout: 60
+
+chromadb:
+  # Path to store the vector database files.
+  # It will be created in the project root if it doesn't exist.
+  path: "./chroma_db"
+  # The name of the collection to store memories.
+  collection_name: "aegis_memories"
+
+reporter:
+  # Directory to save the analysis reports.
+  # It will be created in the project root if it doesn't exist.
+  output_dir: "./reports"
