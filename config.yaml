@@ -25,3 +25,7 @@ reporter:
   # Directory to save the analysis reports.
   # It will be created in the project root if it doesn't exist.
   output_dir: "./reports"
+
+logging:
+  # File to store the full conversation with the AI for debugging.
+  ai_dialogues_file: "./logs/ai_dialogues.jsonl"

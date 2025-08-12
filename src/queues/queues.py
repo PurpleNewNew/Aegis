@@ -13,5 +13,9 @@ soft_vuln_q = asyncio.Queue()
 # ③-b Reverse Queue - 逆向分析任务队列
 reverse_analysis_q = asyncio.Queue()
 
-# ④ 最终结果队列
-final_results_q = asyncio.Queue()
+# ④ AI分析结果的统一出口
+ai_output_q = asyncio.Queue()
+
+# ⑤ 广播后的专属队列
+reporter_q = asyncio.Queue() # 报告器的专属队列
+memory_q = asyncio.Queue()   # 记忆器的专属队列

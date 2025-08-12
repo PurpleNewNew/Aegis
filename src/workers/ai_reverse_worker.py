@@ -80,6 +80,9 @@ Analyze the following network request to **passively infer** potential server-si
                     analysis_text = response['message']['content']
                     self.logger.info(f"Ollama analysis received for {context['url']}.")
 
+                    # Log the conversation for debugging
+                    await log_ai_dialogue(prompt, analysis_text, self.config['logging']['ai_dialogues_file'])
+
                     # 4. Package and send result
                     analysis_result = {
                         'source_context': context,
