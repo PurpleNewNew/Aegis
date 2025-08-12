@@ -50,38 +50,46 @@ class MemoryWorker:
         try:
             while True:
                 result = await self.input_q.get()
-                self.logger.debug(f"收到来自 {result.get('worker')} 的结果用于记忆存储。")
-
-                # 从结果中创建一个简洁的记忆文档。
                 source_context = result.get('source_context', {})
-                analysis_text = result.get('analysis_text', '')
-                
-                # 我们只想记忆实际的发现，而不是“未发现漏洞”这类消息。
-                if "no vulnerabilities identified" in analysis_text.lower() or "未识别出" in analysis_text or not analysis_text:
-                    self.logger.info("跳过对无发现结果的记忆。")
+                findings = result.get('findings', [])
+                worker_name = result.get('worker')
+
+                if not findings:
                     self.input_q.task_done()
                     continue
 
-                memory_doc = (
-                    f"当使用方法 '{source_context.get('method')}' 分析URL '{source_context.get('url')}' 时, "
-                    f"产生了以下分析结果: {analysis_text}"
-                )
-                
-                memory_id = self.create_memory_id(memory_doc)
+                self.logger.info(f"正在为来自 {worker_name} 的 {len(findings)} 个发现创建记忆。")
+
+                docs_to_add = []
+                ids_to_add = []
+                metadatas_to_add = []
+
+                for finding in findings:
+                    # 为每个发现创建一个简洁、有意义的记忆文档
+                    memory_doc = (
+                        f"对于URL '{source_context.get('url')}', 由 '{worker_name}' 发现一个置信度为 '{finding.get('confidence')}' 的 '{finding.get('vulnerability')}' (严重性: {finding.get('severity')})。 "
+                        f"推理过程: {finding.get('reasoning')}"
+                    )
+                    memory_id = self.create_memory_id(memory_doc)
+                    
+                    docs_to_add.append(memory_doc)
+                    ids_to_add.append(memory_id)
+                    metadatas_to_add.append({
+                        'source_url': source_context.get('url'),
+                        'vulnerability': finding.get('vulnerability'),
+                        'worker': worker_name
+                    })
 
                 try:
-                    # 将文档添加到集合中。ChromaDB会处理嵌入。
-                    # 使用带有相同ID的`add`方法，在较新版本的chromadb中会更新现有条目，
-                    # 在旧版本中会引发错误。这里我们假设需要唯一的记忆。
-                    self.collection.add(
-                        ids=[memory_id],
-                        documents=[memory_doc],
-                        metadatas=[{'source_url': source_context.get('url')}] # 可选的元数据
-                    )
-                    self.logger.info(f"成功为URL {source_context.get('url')} 存储了新记忆 (ID: {memory_id[:8]}...)." )
+                    if docs_to_add:
+                        self.collection.add(
+                            ids=ids_to_add,
+                            documents=docs_to_add,
+                            metadatas=metadatas_to_add
+                        )
+                        self.logger.info(f"成功存储了 {len(docs_to_add)} 条新记忆。")
                 except Exception as e:
-                    # 如果我们尝试添加一个重复的ID，可能会发生这种情况，这没关系。
-                    self.logger.warning(f"无法存储记忆 (可能已存在): {e}")
+                    self.logger.warning(f"无法存储记忆 (可能部分已存在): {e}")
 
                 self.input_q.task_done()
 

@@ -1,4 +1,3 @@
-
 sequenceDiagram
     participant User as 用户
     participant Browser as 浏览器
@@ -9,7 +8,8 @@ sequenceDiagram
 
     participant Reader as Jsonl读取器
     participant Dispatcher as 智能调度员
-    participant SpecAI as 专精AI Worker
+    participant Prompts as prompts.py
+    participant SpecAI as 专精AI Worker<br/>(Soft/Reverse/JS)
     participant LLM_VDB as Ollama & ChromaDB
     participant AILog as logs/ai_dialogues.jsonl
     participant Broadcaster as 广播器
@@ -20,34 +20,39 @@ sequenceDiagram
 
     par 捕获流水线
         loop 实时捕获
-            Browser-->>Controller: 1. 发送CDP事件
+            Browser-->>Controller: 1. 发送请求/响应事件
             Controller-->>Filter: 2. 原始事件入队
-            Filter-->>Writer: 3. (检查白名单后)精炼上下文入队
+            Note over Filter: (包含JS文件内容)
+            Filter-->>Writer: 3. (白名单过滤后)精炼上下文入队
             Writer-->>FileBuffer: 4. 追加写入JSON行
         end
     and 分析流水线
         loop 实时分析
-            Reader-->>FileBuffer: 5. 追踪(tail)文件变化
+            Reader-->>FileBuffer: 5. 追踪文件变化
             Reader-->>Dispatcher: 6. 新任务入队
-            Dispatcher-->>SpecAI: 7. 任务分发至专属AI队列
+            Dispatcher-->>SpecAI: 7. 任务分发至专属AI队列<br/>(网络请求/JS文件)
             
             activate SpecAI
+            SpecAI->>Prompts: 8. 获取高度优化的Prompt
             Note over SpecAI: 开始RAG流程
-            SpecAI->>LLM_VDB: 8. 查询相关记忆
-            LLM_VDB-->>SpecAI: 9. 返回记忆片段
-            SpecAI->>LLM_VDB: 10. 组合Prompt, 请求分析
-            LLM_VDB-->>SpecAI: 11. 返回分析结果
+            SpecAI->>LLM_VDB: 9. 查询相关记忆
+            LLM_VDB-->>SpecAI: 10. 返回记忆片段
+            SpecAI->>LLM_VDB: 11. 组合Prompt, 请求分析
+            LLM_VDB-->>SpecAI: 12. 返回分析结果 (JSON格式)
             deactivate SpecAI
 
-            SpecAI->>AILog: 12. 记录完整对话
-            SpecAI->>Broadcaster: 13. 分析结果入队
+            SpecAI->>AILog: 13. 记录完整对话
+            Note over SpecAI: 14. 解析JSON结果
+            SpecAI->>Broadcaster: 15. 包含漏洞对象的分析结果入队
 
             par 并行最终处理
-                Broadcaster-->>Reporter: 14a. 广播至报告队列
-                Reporter-->>Reporter: 15a. 写入Markdown报告
+                Broadcaster-->>Reporter: 16a. 广播至报告队列
+                Note over Reporter: 17a. 遍历漏洞列表
+                Reporter-->>Reporter: 18a. 将每个漏洞写入报告
             and
-                Broadcaster-->>Memory: 14b. 广播至记忆队列
-                Memory-->>LLM_VDB: 15b. 将新发现存入记忆
+                Broadcaster-->>Memory: 16b. 广播至记忆队列
+                Note over Memory: 17b. 遍历漏洞列表
+                Memory-->>LLM_VDB: 18b. 将每个发现存入记忆
             end
         end
     end

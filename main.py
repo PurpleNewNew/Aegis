@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 import yaml
@@ -10,9 +9,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 # 导入队列定义
 from src.queues.queues import (
     raw_events_q,
-    refined_contexts_q, # 现在是文件写入器的输入
+    refined_contexts_q,
     soft_vuln_q,
     reverse_analysis_q,
+    js_analysis_q, # 新增
     ai_output_q,
     reporter_q,
     memory_q
@@ -21,11 +21,12 @@ from src.queues.queues import (
 # 导入组件
 from src.controller.cdp_controller import CDPController
 from src.workers.filter_worker import FilterWorker
-from src.workers.jsonl_writer_worker import JsonlWriterWorker # 新增
-from src.workers.jsonl_reader_worker import JsonlReaderWorker # 新增
+from src.workers.jsonl_writer_worker import JsonlWriterWorker
+from src.workers.jsonl_reader_worker import JsonlReaderWorker
 from src.workers.dispatcher_worker import Dispatcher
 from src.workers.ai_soft_worker import AISoftWorker
 from src.workers.ai_reverse_worker import AIReverseWorker
+from src.workers.js_analysis_worker import JSAnalysisWorker # 新增
 from src.workers.broadcaster import Broadcaster
 from src.workers.reporter_worker import ReporterWorker
 from src.workers.memory_worker import MemoryWorker
@@ -75,9 +76,13 @@ async def main():
 
         # --- 分析流水线 ---
         jsonl_reader = JsonlReaderWorker(output_q=analysis_tasks_q, file_path=capture_file_path)
-        dispatcher = Dispatcher(input_q=analysis_tasks_q, soft_q=soft_vuln_q, reverse_q=reverse_analysis_q)
+        dispatcher = Dispatcher(input_q=analysis_tasks_q, soft_q=soft_vuln_q, reverse_q=reverse_analysis_q, js_q=js_analysis_q)
+        
+        # 三个并行的AI分析器
         ai_soft_worker = AISoftWorker(input_q=soft_vuln_q, output_q=ai_output_q, config=config)
         ai_reverse_worker = AIReverseWorker(input_q=reverse_analysis_q, output_q=ai_output_q, config=config)
+        js_analysis_worker = JSAnalysisWorker(input_q=js_analysis_q, output_q=ai_output_q, config=config) # 新增
+
         broadcaster = Broadcaster(input_q=ai_output_q, output_queues=[reporter_q, memory_q])
         reporter_worker = ReporterWorker(input_q=reporter_q, config=config)
         memory_worker = MemoryWorker(input_q=memory_q, config=config)
@@ -97,6 +102,7 @@ async def main():
         tasks.append(asyncio.create_task(dispatcher.run(), name="Dispatcher"))
         tasks.append(asyncio.create_task(ai_soft_worker.run(), name="AISoftWorker"))
         tasks.append(asyncio.create_task(ai_reverse_worker.run(), name="AIReverseWorker"))
+        tasks.append(asyncio.create_task(js_analysis_worker.run(), name="JSAnalysisWorker")) # 新增
         tasks.append(asyncio.create_task(broadcaster.run(), name="Broadcaster"))
         tasks.append(asyncio.create_task(reporter_worker.run(), name="ReporterWorker"))
         tasks.append(asyncio.create_task(memory_worker.run(), name="MemoryWorker"))

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import ollama
 import chromadb
@@ -60,19 +61,23 @@ class AISoftWorker:
                     analysis_text = response['message']['content']
                     self.logger.info(f"已收到对 {context['url']} 的Ollama分析。")
 
-                    # 为调试记录对话
                     await log_ai_dialogue(prompt, analysis_text, self.config['logging']['ai_dialogues_file'])
 
-                    # 4. 打包并发送结果
-                    analysis_result = {
-                        'source_context': context,
-                        'analysis_text': analysis_text,
-                        'worker': self.__class__.__name__
-                    }
-                    await self.output_q.put(analysis_result)
+                    # 4. 解析JSON响应并发送结果
+                    try:
+                        findings = json.loads(analysis_text)
+                        if findings: # 仅当有发现时才发送
+                            analysis_result = {
+                                'source_context': context,
+                                'findings': findings, # 这是一个对象列表
+                                'worker': self.__class__.__name__
+                            }
+                            await self.output_q.put(analysis_result)
+                    except json.JSONDecodeError:
+                        self.logger.error(f"无法解析来自Ollama的JSON响应: {analysis_text}")
 
                 except Exception as e:
-                    self.logger.error(f"与Ollama通信时出错: {e}")
+                    self.logger.error(f"与Ollama通信时出错: {e}", exc_info=True)
 
                 self.input_q.task_done()
 

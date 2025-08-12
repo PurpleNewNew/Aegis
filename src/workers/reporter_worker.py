@@ -36,17 +36,41 @@ class ReporterWorker:
         try:
             while True:
                 result = await self.input_q.get()
-                self.logger.info(f"正在报告一个来自 {result.get('worker')} 的发现。")
-
-                # 格式化报告内容
+                worker_name = result.get('worker')
                 source_context = result.get('source_context', {})
-                # 使用三引号以支持多行f-string
-                report_content = f"""## 来自 {result.get('worker')} 的发现\n\n**时间戳:** {datetime.now().isoformat()}\n**URL:** `{source_context.get('url')}`\n**方法:** {source_context.get('method')}\n\n### AI 分析\n```text\n{result.get('analysis_text', '未提供分析文本。')}\n```\n\n### 原始上下文\n<details>\n<summary>点击展开</summary>\n\n```json\n{source_context}\n```\n</details>\n\n---\n\n"""
+                findings = result.get('findings', [])
+                
+                self.logger.info(f"收到来自 {worker_name} 的 {len(findings)} 个发现。")
 
+                # 为这批发现创建一个报告片段
+                report_segment = f"""## 来自 {worker_name} 的分析报告\n\n**源头 URL:** `{source_context.get('url')}`\n**分析时间:** {datetime.now().isoformat()}\n\n"""
+
+                for finding in findings:
+                    report_segment += f"""### 漏洞: {finding.get('vulnerability', 'N/A')}\n
+- **严重性:** {finding.get('severity', 'N/A')}
+- **置信度:** {finding.get('confidence', 'N/A')}
+
+**推理过程:**
+```text
+{finding.get('reasoning', 'N/A')}
+```
+
+**代码证据 (如适用):**
+```javascript
+{finding.get('evidence', 'N/A')}
+```
+
+**修复建议:**
+```text
+{finding.get('suggestion', 'N/A')}
+```
+---\n"""
+                
+                # 将整个片段追加到报告文件中
                 try:
                     async with aiofiles.open(self.report_file_path, mode='a', encoding='utf-8') as f:
-                        await f.write(report_content)
-                    self.logger.info(f"成功将发现写入到 {self.report_file_path}")
+                        await f.write(report_segment)
+                    self.logger.info(f"成功将 {len(findings)} 个发现写入到 {self.report_file_path}")
                 except Exception as e:
                     self.logger.error(f"写入报告文件失败: {e}")
 

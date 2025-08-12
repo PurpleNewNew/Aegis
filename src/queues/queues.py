@@ -12,6 +12,9 @@ soft_vuln_q = asyncio.Queue()
 # ③-b 逆向分析任务队列
 reverse_analysis_q = asyncio.Queue()
 
+# ③-c JS Analysis Queue - JS文件分析任务队列
+js_analysis_q = asyncio.Queue()
+
 # ④ AI分析结果的统一出口
 ai_output_q = asyncio.Queue()
 

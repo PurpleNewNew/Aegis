@@ -1,8 +1,7 @@
-
 import asyncio
 import logging
 from asyncio import Queue
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import async_playwright, Page, Request, Response
 
 class CDPController:
     """
@@ -22,15 +21,13 @@ class CDPController:
         self.port = config['browser']['remote_debugging_port']
         self.logger = logging.getLogger(self.__class__.__name__)
 
-    async def handle_request(self, request):
+    async def handle_request(self, request: Request):
         """
         处理'request'事件的事件处理器。
         将一个结构化的事件放入输出队列。
         """
         try:
-            # 获取发起请求的页面的URL
             initiator_url = request.frame.page.url
-
             event = {
                 'event_type': 'request',
                 'method': request.method,
@@ -45,13 +42,34 @@ class CDPController:
         except Exception as e:
             self.logger.error(f"处理请求事件时出错 {request.url}: {e}")
 
+    async def handle_response(self, response: Response):
+        """
+        处理'response'事件，专门用于捕获JavaScript文件内容。
+        """
+        try:
+            # 检查Content-Type是否为JavaScript
+            content_type = response.headers().get('content-type', '')
+            if 'javascript' in content_type or 'jscript' in content_type:
+                url = response.url
+                self.logger.info(f"捕获到JS文件响应: {url}")
+                js_content = await response.text()
+                
+                event = {
+                    'event_type': 'javascript_file',
+                    'url': url,
+                    'content': js_content,
+                    'initiator_url': response.frame.page.url
+                }
+                await self.output_q.put(event)
+        except Exception as e:
+            self.logger.error(f"处理JS文件响应时出错 {response.url}: {e}")
+
     async def setup_page_listeners(self, page: Page):
         """为给定的页面附加所有必要的事件监听器。"""
         try:
             self.logger.info(f"为页面设置监听器: {await page.title()}")
             page.on("request", self.handle_request)
-            # 你可以在这里添加更多的监听器，例如：用于响应、控制台日志等。
-            # page.on("response", self.handle_response)
+            page.on("response", self.handle_response) # 新增响应监听
         except Exception as e:
             self.logger.error(f"为页面设置监听器失败。页面可能已关闭。错误: {e}")
 

@@ -77,40 +77,52 @@ class FilterWorker:
         try:
             while True:
                 event = await self.input_q.get()
+                event_type = event.get('event_type')
                 request_url = event.get('url', '')
                 initiator_url = event.get('initiator_url', '')
 
-                # 1. 上下文感知的白名单检查
+                # 1. 上下文感知的白名单检查 (对所有事件类型都生效)
                 if not self.is_in_scope(request_url, initiator_url):
-                    self.logger.debug(f"丢弃范围之外的请求: {request_url} (发起者: {initiator_url})")
+                    self.logger.debug(f"丢弃范围之外的事件: {request_url} (发起者: {initiator_url})")
                     self.input_q.task_done()
                     continue
 
-                # 2. 静态资源检查 (基于资源类型)
-                resource_type = event.get('resource_type')
-                if resource_type in self.BLOCKED_RESOURCE_TYPES:
-                    self.logger.info(f"按类型 '{resource_type}' 丢弃静态资源: {request_url}")
-                    self.input_q.task_done()
-                    continue
+                # --- 针对 'request' 事件类型的特定过滤 ---
+                if event_type == 'request':
+                    # 2. 静态资源检查 (基于资源类型)
+                    resource_type = event.get('resource_type')
+                    if resource_type in self.BLOCKED_RESOURCE_TYPES:
+                        self.logger.info(f"按类型 '{resource_type}' 丢弃静态资源: {request_url}")
+                        self.input_q.task_done()
+                        continue
 
-                # 3. 静态资源检查 (基于文件扩展名，作为后备方案)
-                if any(request_url.lower().endswith(ext) for ext in self.STATIC_EXTENSIONS):
-                    self.logger.info(f"按扩展名丢弃静态资源: {request_url}")
-                    self.input_q.task_done()
-                    continue
+                    # 3. 静态资源检查 (基于文件扩展名，作为后备方案)
+                    if any(request_url.lower().endswith(ext) for ext in self.STATIC_EXTENSIONS):
+                        self.logger.info(f"按扩展名丢弃静态资源: {request_url}")
+                        self.input_q.task_done()
+                        continue
+                    
+                    # 如果所有检查都通过，则精炼并转发上下文
+                    refined_context = {
+                        'type': 'network_request', # 标记为网络请求类型以供调度
+                        'url': event['url'],
+                        'method': event['method'],
+                        'headers': event['headers'],
+                        'post_data': event['post_data'],
+                        'resource_type': resource_type
+                    }
+                    await self.output_q.put(refined_context)
+                    self.logger.info(f"网络请求已通过并送去分析: {request_url}")
 
-                # 如果所有检查都通过，则精炼并转发上下文
-                refined_context = {
-                    'type': 'network_request',
-                    'url': event['url'],
-                    'method': event['method'],
-                    'headers': event['headers'],
-                    'post_data': event['post_data'],
-                    'resource_type': resource_type
-                }
-                await self.output_q.put(refined_context)
-                self.logger.info(f"请求已通过并送去分析: {request_url}")
+                # --- 针对 'javascript_file' 事件类型，直接转发 ---
+                elif event_type == 'javascript_file':
+                    self.logger.info(f"JS文件已通过并送去分析: {request_url}")
+                    # 事件本身已经包含了所需的所有信息 (url, content, initiator_url)
+                    await self.output_q.put(event)
                 
+                else:
+                    self.logger.warning(f"未知的事件类型: {event_type}，予以丢弃。")
+
                 self.input_q.task_done()
 
         except asyncio.CancelledError:
