@@ -1,5 +1,5 @@
 playwright
-ollama
+openai
 chromadb
 PyYAML
 aiofiles

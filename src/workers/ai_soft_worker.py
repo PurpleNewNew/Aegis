@@ -1,11 +1,12 @@
+
 import asyncio
 import json
 import logging
-import ollama
+import openai # 使用openai库
 import chromadb
 from asyncio import Queue
 from src.utils.ai_logger import log_ai_dialogue
-from src.prompts.prompt import get_soft_vuln_prompt # 导入集中的提示词函数
+from src.prompts.prompt import get_soft_vuln_prompt
 
 class AISoftWorker:
     """
@@ -18,10 +19,11 @@ class AISoftWorker:
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
         
-        # 初始化Ollama客户端
-        self.ollama_client = ollama.AsyncClient(
-            host=self.config['ollama']['host'],
-            timeout=self.config['ollama']['timeout']
+        # 初始化OpenAI客户端以连接LM-Studio
+        self.llm_client = openai.AsyncOpenAI(
+            base_url=self.config['llm_service']['base_url'],
+            api_key=self.config['llm_service']['api_key'],
+            timeout=self.config['llm_service']['timeout']
         )
         
         # 初始化ChromaDB客户端
@@ -52,32 +54,35 @@ class AISoftWorker:
                 # 2. 使用集中化函数构建提示
                 prompt = get_soft_vuln_prompt(context, memories)
 
-                # 3. 从Ollama生成分析
+                # 3. 从LLM服务生成分析
                 try:
-                    response = await self.ollama_client.chat(
-                        model=self.config['ollama']['model'],
-                        messages=[{'role': 'user', 'content': prompt}]
+                    response = await self.llm_client.chat.completions.create(
+                        model=self.config['llm_service']['model_name'],
+                        messages=[{'role': 'user', 'content': prompt}],
+                        temperature=0.2 # 降低随机性以获得更稳定的JSON输出
                     )
-                    analysis_text = response['message']['content']
-                    self.logger.info(f"已收到对 {context['url']} 的Ollama分析。")
+                    analysis_text = response.choices[0].message.content
+                    self.logger.info(f"已收到对 {context['url']} 的LLM分析。")
 
                     await log_ai_dialogue(prompt, analysis_text, self.config['logging']['ai_dialogues_file'])
 
                     # 4. 解析JSON响应并发送结果
                     try:
                         findings = json.loads(analysis_text)
-                        if findings: # 仅当有发现时才发送
+                        if findings:
                             analysis_result = {
                                 'source_context': context,
-                                'findings': findings, # 这是一个对象列表
+                                'findings': findings,
                                 'worker': self.__class__.__name__
                             }
                             await self.output_q.put(analysis_result)
+                        else:
+                            self.logger.info(f"AI分析完成，未在 {context['url']} 中发现任何软漏洞。")
                     except json.JSONDecodeError:
-                        self.logger.error(f"无法解析来自Ollama的JSON响应: {analysis_text}")
+                        self.logger.error(f"无法解析来自LLM的JSON响应: {analysis_text}")
 
                 except Exception as e:
-                    self.logger.error(f"与Ollama通信时出错: {e}", exc_info=True)
+                    self.logger.error(f"与LLM服务通信时出错: {e}", exc_info=True)
 
                 self.input_q.task_done()
 

@@ -10,15 +10,17 @@ scanner_scope:
   # 重要：只有在此列表中的域名/IP才会被分析。
   # 在这里添加你的目标应用的域名/IP。
   # 示例: ["example.com", "api.example.com", "127.0.0.1"]
-  whitelist_domains: ["127.0.0.1"]
+  whitelist_domains: ["121.43.58.124"]
 
-ollama:
-  # Ollama服务的主机地址。
-  host: 'http://localhost:11434'
-  # 用于分析的模型名称。
-  model: 'gpt-oss:20b'
+llm_service:
+  # LM-Studio OpenAI兼容API的地址。
+  base_url: "http://localhost:1234/v1"
+  # 在LM-Studio中加载的模型标识符。
+  model_name: "openai/gpt-oss-20b"
+  # 本地服务通常不需要API密钥，但openai库需要一个值。
+  api_key: "lm-studio"
   # API调用的超时时间（秒）。
-  timeout: 3000
+  timeout: 300
 
 chromadb:
   # 存储向量数据库文件的路径。

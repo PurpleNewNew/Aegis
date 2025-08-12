@@ -48,7 +48,7 @@ class CDPController:
         """
         try:
             # 检查Content-Type是否为JavaScript
-            content_type = response.headers().get('content-type', '')
+            content_type = response.headers.get('content-type', '')
             if 'javascript' in content_type or 'jscript' in content_type:
                 url = response.url
                 self.logger.info(f"捕获到JS文件响应: {url}")
