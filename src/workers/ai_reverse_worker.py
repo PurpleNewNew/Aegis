@@ -3,11 +3,13 @@ import logging
 import ollama
 import chromadb
 from asyncio import Queue
+from src.utils.ai_logger import log_ai_dialogue
+from src.prompts.prompt import get_hard_vuln_prompt # 导入集中的提示词函数
 
 class AIReverseWorker:
     """
-    Analyzes contexts for "hard" vulnerabilities (SQLi, RCE etc.) by inference,
-    using a RAG-powered LLM call.
+    通过推断分析上下文中的“硬”漏洞（如SQLi, RCE等），
+    使用由RAG驱动的LLM调用。
     """
 
     def __init__(self, input_q: Queue, output_q: Queue, config: dict):
@@ -24,66 +26,43 @@ class AIReverseWorker:
         try:
             self.chroma_client = chromadb.PersistentClient(path=self.config['chromadb']['path'])
             self.collection = self.chroma_client.get_or_create_collection(name=self.config['chromadb']['collection_name'])
-            self.logger.info(f"Connected to ChromaDB and got collection '{self.config['chromadb']['collection_name']}'.")
+            self.logger.info(f"已连接到ChromaDB并获取到集合 '{self.config['chromadb']['collection_name']}'.")
         except Exception as e:
-            self.logger.error(f"Failed to initialize ChromaDB: {e}", exc_info=True)
+            self.logger.error(f"初始化ChromaDB失败: {e}", exc_info=True)
             self.chroma_client = None
 
-    def build_prompt(self, context, memories):
-        """
-        Builds a detailed prompt for the LLM, focusing on reverse engineering and backend vulnerabilities.
-        """
-        prompt = f"""You are a web security researcher with expertise in reverse engineering and identifying backend vulnerabilities. 
-Analyze the following network request to **passively infer** potential server-side flaws. 
-**Do not suggest sending any packets or payloads.** Your task is to guess vulnerabilities based on the endpoint structure and parameters.\n\n--- Current Request Context ---\n\nURL: {context['url']}\n\nMethod: {context['method']}\n\nHeaders: {context['headers']}\n\nPOST Data (Hex): {context['post_data']}\n\n"""
-
-        if memories and memories.get('documents') and memories['documents'][0]:
-            prompt += "--- Relevant Historical Analysis (Memories) ---\n"
-            for mem in memories['documents'][0]:
-                prompt += f"- {mem}\n"
-            prompt += "\n"
-
-        prompt += (
-            "--- Analysis Task ---"
-            "1. Passively analyze the request. Look for patterns that suggest vulnerabilities like SQL Injection, RCE, SSRF, or insecure deserialization (e.g., suspicious API endpoint names, query parameters, data formats).\n"
-            "2. For each **suspected** vulnerability, explain your reasoning. Rate the Severity (Low/Medium/High/Critical) and your Confidence (in percentage).\n"
-            "3. If no such patterns are found, state 'No hard vulnerability patterns identified.'.\n"
-            "4. Format your response clearly."
-        )
-        return prompt
-
     async def run(self):
-        self.logger.info("AI Reverse Worker is running.")
+        self.logger.info("AI逆向分析Worker正在运行。")
         try:
             while True:
                 context = await self.input_q.get()
-                self.logger.info(f"Analyzing hard vulnerabilities for: {context['url']}")
+                self.logger.info(f"正在为 {context['url']} 分析硬漏洞。")
 
-                # 1. Retrieve memories
+                # 1. 检索记忆
                 memories = None
                 if self.chroma_client:
                     try:
                         memories = self.collection.query(query_texts=[context['url']], n_results=3)
-                        self.logger.info(f"Retrieved {len(memories.get('documents', [[]])[0])} memories for URL.")
+                        self.logger.info(f"为URL检索到 {len(memories.get('documents', [[]])[0])} 条记忆。")
                     except Exception as e:
-                        self.logger.error(f"Error querying ChromaDB: {e}")
+                        self.logger.error(f"查询ChromaDB时出错: {e}")
 
-                # 2. Build prompt
-                prompt = self.build_prompt(context, memories)
+                # 2. 构建提示
+                prompt = get_hard_vuln_prompt(context, memories)
 
-                # 3. Generate analysis
+                # 3. 生成分析
                 try:
                     response = await self.ollama_client.chat(
                         model=self.config['ollama']['model'],
                         messages=[{'role': 'user', 'content': prompt}]
                     )
                     analysis_text = response['message']['content']
-                    self.logger.info(f"Ollama analysis received for {context['url']}.")
+                    self.logger.info(f"已收到对 {context['url']}' 的Ollama分析。")
 
-                    # Log the conversation for debugging
+                    # 为调试记录对话
                     await log_ai_dialogue(prompt, analysis_text, self.config['logging']['ai_dialogues_file'])
 
-                    # 4. Package and send result
+                    # 4. 打包并发送结果
                     analysis_result = {
                         'source_context': context,
                         'analysis_text': analysis_text,
@@ -92,11 +71,11 @@ Analyze the following network request to **passively infer** potential server-si
                     await self.output_q.put(analysis_result)
 
                 except Exception as e:
-                    self.logger.error(f"Error communicating with Ollama: {e}")
+                    self.logger.error(f"与Ollama通信时出错: {e}")
 
                 self.input_q.task_done()
 
         except asyncio.CancelledError:
-            self.logger.info("AI Reverse Worker is shutting down.")
+            self.logger.info("AI逆向分析Worker正在关闭。")
         except Exception as e:
-            self.logger.error(f"An error occurred in AIReverseWorker: {e}", exc_info=True)
+            self.logger.error(f"在AIReverseWorker中发生错误: {e}", exc_info=True)

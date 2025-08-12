@@ -1,21 +1,22 @@
+
 import asyncio
 import logging
 from asyncio import Queue
 
 class Dispatcher:
     """
-    Pulls refined contexts from a queue and dispatches them to specialized
-    AI worker queues based on the context type or content.
+    从队列中提取精炼的上下文，并根据上下文类型或内容
+    将其分发到专用的AI Worker队列中。
     """
 
     def __init__(self, input_q: Queue, soft_q: Queue, reverse_q: Queue):
         """
-        Initializes the dispatcher.
+        初始化调度器。
 
         Args:
-            input_q: The queue from which to pull refined contexts.
-            soft_q: The queue for soft vulnerability analysis tasks.
-            reverse_q: The queue for reverse engineering analysis tasks.
+            input_q: 用于提取精炼上下文的输入队列。
+            soft_q: 用于软漏洞分析任务的队列。
+            reverse_q: 用于逆向工程分析任务的队列。
         """
         self.input_q = input_q
         self.soft_q = soft_q
@@ -24,27 +25,27 @@ class Dispatcher:
 
     async def run(self):
         """
-        The main loop for the dispatcher.
-        It continuously pulls contexts and routes them.
+        调度器的主循环。
+        它持续地提取上下文并进行路由。
         """
-        self.logger.info("Dispatcher is running.")
+        self.logger.info("调度器正在运行。")
         try:
             while True:
                 context = await self.input_q.get()
-                self.logger.debug(f"Received context: {context}")
+                self.logger.debug(f"收到上下文: {context}")
 
-                # Simple routing logic: send network requests to both analysis pipelines.
+                # 简单的路由逻辑：将网络请求发送到两个分析流水线。
                 if context.get('type') == 'network_request':
-                    self.logger.info(f"Routing 'network_request' for {context['url']} to AI workers.")
-                    # We put the same context into both queues for parallel analysis.
+                    self.logger.info(f"正在将 {context['url']} 的'网络请求'路由到AI Workers。")
+                    # 我们将相同的上下文放入两个队列中以进行并行分析。
                     await self.soft_q.put(context)
                     await self.reverse_q.put(context)
                 else:
-                    self.logger.warning(f"No specific route for context type {context.get('type')}. Discarding.")
+                    self.logger.warning(f"没有针对上下文类型 {context.get('type')} 的特定路由。正在丢弃。")
 
                 self.input_q.task_done()
 
         except asyncio.CancelledError:
-            self.logger.info("Dispatcher is shutting down.")
+            self.logger.info("调度器正在关闭。")
         except Exception as e:
-            self.logger.error(f"An error occurred in Dispatcher: {e}", exc_info=True)
+            self.logger.error(f"调度器发生错误: {e}", exc_info=True)

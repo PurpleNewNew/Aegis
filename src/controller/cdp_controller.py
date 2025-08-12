@@ -1,21 +1,22 @@
+
 import asyncio
 import logging
 from asyncio import Queue
-from playwright.async_api import async_playwright, Playwright, Browser, Page
+from playwright.async_api import async_playwright, Page
 
 class CDPController:
     """
-    Connects to a running Chrome instance via its remote debugging port using Playwright,
-    and streams network events into a queue for further processing.
+    使用 Playwright 通过远程调试端口连接到一个正在运行的Chrome实例，
+    并将网络事件流式传输到队列中以供进一步处理。
     """
 
     def __init__(self, output_q: Queue, config: dict):
         """
-        Initializes the controller.
+        初始化控制器。
 
         Args:
-            output_q: The queue to which raw CDP events will be sent.
-            config: The application configuration dictionary.
+            output_q: 用于发送原始CDP事件的队列。
+            config: 应用程序的配置字典。
         """
         self.output_q = output_q
         self.port = config['browser']['remote_debugging_port']
@@ -23,8 +24,8 @@ class CDPController:
 
     async def handle_request(self, request):
         """
-        Event handler for 'request' events.
-        Puts a structured event into the output queue.
+        处理'request'事件的事件处理器。
+        将一个结构化的事件放入输出队列。
         """
         try:
             event = {
@@ -32,57 +33,58 @@ class CDPController:
                 'method': request.method,
                 'url': request.url,
                 'headers': await request.all_headers(),
-                'post_data': request.post_data_buffer.hex() if request.post_data_buffer else None
+                'post_data': request.post_data_buffer.hex() if request.post_data_buffer else None,
+                'resource_type': request.resource_type
             }
             await self.output_q.put(event)
-            self.logger.info(f"Captured request: {event['method']} {event['url']}")
+            self.logger.info(f"已捕获请求: {event['method']} {event['url']}")
         except Exception as e:
-            self.logger.error(f"Error handling request event for {request.url}: {e}")
+            self.logger.error(f"处理请求事件时出错 {request.url}: {e}")
 
     async def setup_page_listeners(self, page: Page):
-        """Attaches all necessary event listeners to a given page."""
+        """为给定的页面附加所有必要的事件监听器。"""
         try:
-            self.logger.info(f"Setting up listeners for page: {await page.title()}")
+            self.logger.info(f"为页面设置监听器: {await page.title()}")
             page.on("request", self.handle_request)
-            # You can add more listeners here, e.g., for responses, console logs, etc.
+            # 你可以在这里添加更多的监听器，例如：用于响应、控制台日志等。
             # page.on("response", self.handle_response)
         except Exception as e:
-            self.logger.error(f"Failed to set up listeners for page. It might have closed. Error: {e}")
+            self.logger.error(f"为页面设置监听器失败。页面可能已关闭。错误: {e}")
 
     async def run(self):
         """
-        Connects to the browser, attaches listeners to existing and new pages,
-        and keeps running to monitor all activity.
+        连接到浏览器，为现有和新页面附加监听器，
+        并保持运行以监控所有活动。
         """
-        self.logger.info(f"Attempting to connect to Chrome on port {self.port}...")
+        self.logger.info(f"尝试连接到端口 {self.port} 上的Chrome浏览器...")
         async with async_playwright() as p:
             try:
                 browser = await p.chromium.connect_over_cdp(f"http://localhost:{self.port}")
-                self.logger.info("Successfully connected to Chrome.")
+                self.logger.info("成功连接到Chrome。")
                 
                 context = browser.contexts[0]
 
-                # 1. Set up listeners for all currently open pages
+                # 1. 为所有当前打开的页面设置监听器
                 for page in context.pages:
                     await self.setup_page_listeners(page)
 
-                # 2. Set up a listener for any new pages that are created
+                # 2. 为任何新创建的页面设置监听器
                 context.on("page", self.setup_page_listeners)
 
-                self.logger.info("CDP Controller is now monitoring all current and future pages.")
+                self.logger.info("CDP控制器现在正在监控所有当前和未来的页面。")
                 
-                # Keep the task alive to listen for events
+                # 保持任务存活以监听事件
                 while browser.is_connected():
                     await asyncio.sleep(1)
 
             except (ConnectionRefusedError, asyncio.TimeoutError):
                 self.logger.error(
-                    f"Connection to Chrome on port {self.port} failed. "
-                    f"Please ensure Chrome is running with '--remote-debugging-port={self.port}'."
+                    f"连接到端口 {self.port} 上的Chrome失败。"
+                    f"请确保Chrome正在以 '--remote-debugging-port={self.port}' 参数运行。"
                 )
             except Exception as e:
-                self.logger.error(f"An unexpected error occurred in CDPController: {e}", exc_info=True)
+                self.logger.error(f"CDP控制器发生意外错误: {e}", exc_info=True)
             finally:
-                self.logger.info("CDP Controller has shut down.")
+                self.logger.info("CDP控制器已关闭。")
                 if 'browser' in locals() and browser.is_connected():
                     await browser.close()

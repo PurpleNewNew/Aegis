@@ -1,15 +1,16 @@
+
 import asyncio
 import logging
 import yaml
 import os
 
-# Configure basic logging
+# 配置基础日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# Import queue definitions
+# 导入队列定义
 from src.queues.queues import (
     raw_events_q,
-    refined_contexts_q, # This will now be the input to the file writer
+    refined_contexts_q, # 现在是文件写入器的输入
     soft_vuln_q,
     reverse_analysis_q,
     ai_output_q,
@@ -17,11 +18,11 @@ from src.queues.queues import (
     memory_q
 )
 
-# Import components
+# 导入组件
 from src.controller.cdp_controller import CDPController
 from src.workers.filter_worker import FilterWorker
-from src.workers.jsonl_writer_worker import JsonlWriterWorker # New
-from src.workers.jsonl_reader_worker import JsonlReaderWorker # New
+from src.workers.jsonl_writer_worker import JsonlWriterWorker # 新增
+from src.workers.jsonl_reader_worker import JsonlReaderWorker # 新增
 from src.workers.dispatcher_worker import Dispatcher
 from src.workers.ai_soft_worker import AISoftWorker
 from src.workers.ai_reverse_worker import AIReverseWorker
@@ -31,49 +32,48 @@ from src.workers.memory_worker import MemoryWorker
 
 async def main():
     """
-    Initializes and runs the Aegis application components.
+    初始化并运行Aegis应用的所有组件。
     """
-    logging.info("Aegis application starting...")
+    logging.info("Aegis应用正在启动...")
 
     # --------------------------------------------------------------------
-    # Step 1: Load Configuration
+    # 步骤 1: 加载配置
     # --------------------------------------------------------------------
     try:
-        with open('config.yaml', 'r') as f:
+        with open('config.yaml', 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
-        logging.info("Configuration loaded successfully.")
+        logging.info("配置加载成功。")
     except FileNotFoundError:
-        logging.error("Configuration file (config.yaml) not found. Please create one.")
+        logging.error("配置文件 (config.yaml) 未找到。请创建一个。")
         return
     except yaml.YAMLError as e:
-        logging.error(f"Error parsing configuration file: {e}")
+        logging.error(f"解析配置文件时出错: {e}")
         return
 
-    # Create directories if they don't exist
+    # 如果目录不存在，则创建它们
     os.makedirs(config['reporter']['output_dir'], exist_ok=True)
     os.makedirs(os.path.dirname(config['logging']['ai_dialogues_file']), exist_ok=True)
-    # Hardcoding data dir for now
     os.makedirs("data", exist_ok=True)
     capture_file_path = "data/capture.jsonl"
 
-    # This queue will connect the file reader to the dispatcher
+    # 这个队列将连接文件读取器和调度器
     analysis_tasks_q = asyncio.Queue()
 
-    # A list to hold all our running tasks
+    # 用于存放所有运行任务的列表
     tasks = []
 
     try:
         # --------------------------------------------------------------------
-        # Step 2: Initialize Components with File Buffering Architecture
+        # 步骤 2: 使用文件缓冲架构初始化组件
         # --------------------------------------------------------------------
-        logging.info("Initializing components...")
+        logging.info("正在初始化组件...")
 
-        # --- Capture Pipeline ---
+        # --- 捕获流水线 ---
         controller = CDPController(output_q=raw_events_q, config=config)
-        filter_worker = FilterWorker(input_q=raw_events_q, output_q=refined_contexts_q)
+        filter_worker = FilterWorker(input_q=raw_events_q, output_q=refined_contexts_q, config=config)
         jsonl_writer = JsonlWriterWorker(input_q=refined_contexts_q, file_path=capture_file_path)
 
-        # --- Analysis Pipeline ---
+        # --- 分析流水线 ---
         jsonl_reader = JsonlReaderWorker(output_q=analysis_tasks_q, file_path=capture_file_path)
         dispatcher = Dispatcher(input_q=analysis_tasks_q, soft_q=soft_vuln_q, reverse_q=reverse_analysis_q)
         ai_soft_worker = AISoftWorker(input_q=soft_vuln_q, output_q=ai_output_q, config=config)
@@ -83,16 +83,16 @@ async def main():
         memory_worker = MemoryWorker(input_q=memory_q, config=config)
 
         # --------------------------------------------------------------------
-        # Step 3: Create and schedule tasks for each component
+        # 步骤 3: 为每个组件创建并调度任务
         # --------------------------------------------------------------------
-        logging.info("Scheduling worker tasks...")
+        logging.info("正在调度Worker任务...")
         
-        # Capture tasks
+        # 捕获任务
         tasks.append(asyncio.create_task(controller.run(), name="CDPController"))
         tasks.append(asyncio.create_task(filter_worker.run(), name="FilterWorker"))
         tasks.append(asyncio.create_task(jsonl_writer.run(), name="JsonlWriterWorker"))
 
-        # Analysis tasks
+        # 分析任务
         tasks.append(asyncio.create_task(jsonl_reader.run(), name="JsonlReaderWorker"))
         tasks.append(asyncio.create_task(dispatcher.run(), name="Dispatcher"))
         tasks.append(asyncio.create_task(ai_soft_worker.run(), name="AISoftWorker"))
@@ -102,25 +102,25 @@ async def main():
         tasks.append(asyncio.create_task(memory_worker.run(), name="MemoryWorker"))
 
         # --------------------------------------------------------------------
-        # Step 4: Run all tasks concurrently
+        # 步骤 4: 并发运行所有任务
         # --------------------------------------------------------------------
-        logging.info("Running all tasks...")
+        logging.info("正在运行所有任务...")
         await asyncio.gather(*tasks)
 
     except asyncio.CancelledError:
-        logging.info("Application shutting down gracefully.")
+        logging.info("应用正在优雅地关闭。")
     finally:
-        # Gracefully cancel all running tasks
+        # 优雅地取消所有正在运行的任务
         for task in tasks:
             if not task.done():
                 task.cancel()
-        # Wait for all tasks to acknowledge cancellation
+        # 等待所有任务确认取消
         await asyncio.gather(*tasks, return_exceptions=True)
-        logging.info("All tasks have been cancelled.")
+        logging.info("所有任务已被取消。")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("Shutdown requested by user.")
+        logging.info("用户请求关闭。")

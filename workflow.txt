@@ -1,77 +1,53 @@
+
 sequenceDiagram
     participant User as 用户
-    participant main.py as 主控脚本
+    participant Browser as 浏览器
     participant Controller as 数据采集器
-    participant Q1 as 原始事件队列
-    participant FilterWorker as 筛选/剪枝Worker
-    participant Q2 as 精炼上下文队列
+    participant Filter as 过滤器
+    participant Writer as Jsonl写入器
+    participant FileBuffer as data/capture.jsonl
+
+    participant Reader as Jsonl读取器
     participant Dispatcher as 智能调度员
-    participant Q_Spec as 专属任务队列<br/>(Q_Soft / Q_Reverse)
-    participant SpecAI as 专精AI Worker<br/>(AI_Soft / AI_Reverse)
-    participant VectorDB as 向量数据库 (记忆)
-    participant LLM as AI大脑 (推理)
-    participant Q_Final as 最终结果队列
+    participant SpecAI as 专精AI Worker
+    participant LLM_VDB as Ollama & ChromaDB
+    participant AILog as logs/ai_dialogues.jsonl
+    participant Broadcaster as 广播器
     participant Reporter as 报告Worker
     participant Memory as 记忆Worker
 
-    User->>main.py: 1. 运行指令 `python main.py analyze ...`
+    User->>Browser: 浏览目标网站
 
-    activate main.py
-    Note over main.py: 2. 初始化所有Queues<br/>并将所有Workers作为后台<br/>异步任务启动和待命
-    main.py->>Controller: 3. 启动数据采集
-    deactivate main.py
+    par 捕获流水线
+        loop 实时捕获
+            Browser-->>Controller: 1. 发送CDP事件
+            Controller-->>Filter: 2. 原始事件入队
+            Filter-->>Writer: 3. (检查白名单后)精炼上下文入队
+            Writer-->>FileBuffer: 4. 追加写入JSON行
+        end
+    and 分析流水线
+        loop 实时分析
+            Reader-->>FileBuffer: 5. 追踪(tail)文件变化
+            Reader-->>Dispatcher: 6. 新任务入队
+            Dispatcher-->>SpecAI: 7. 任务分发至专属AI队列
+            
+            activate SpecAI
+            Note over SpecAI: 开始RAG流程
+            SpecAI->>LLM_VDB: 8. 查询相关记忆
+            LLM_VDB-->>SpecAI: 9. 返回记忆片段
+            SpecAI->>LLM_VDB: 10. 组合Prompt, 请求分析
+            LLM_VDB-->>SpecAI: 11. 返回分析结果
+            deactivate SpecAI
 
-    %% 数据采集与预处理
-    activate Controller
-    Note over Controller: (当CDP事件到达时...)
-    Controller->>Q1: 4. 原始事件入队
-    deactivate Controller
+            SpecAI->>AILog: 12. 记录完整对话
+            SpecAI->>Broadcaster: 13. 分析结果入队
 
-    activate FilterWorker
-    FilterWorker->>Q1: 5. 获取原始事件
-    Note over FilterWorker: 执行过滤、剪枝和格式化
-    FilterWorker->>Q2: 6. 将精炼上下文入队
-    deactivate FilterWorker
-
-    %% 智能调度
-    activate Dispatcher
-    Dispatcher->>Q2: 7. 获取精炼上下文
-    Note over Dispatcher: 基于规则判断任务类型
-    Dispatcher->>Q_Spec: 8. 将上下文分发至专属队列
-    deactivate Dispatcher
-
-    %% 核心AI分析 (RAG流程)
-    activate SpecAI
-    SpecAI->>Q_Spec: 9. 从专属队列获取任务
-
-    Note over SpecAI: **开始RAG流程 - 检索记忆**
-    SpecAI->>VectorDB: 10. 查询与当前上下文相关的历史知识
-    activate VectorDB
-    VectorDB-->>SpecAI: 11. 返回相关记忆片段
-    deactivate VectorDB
-
-    Note over SpecAI: **结合记忆进行推理**
-    SpecAI->>LLM: 12. 发送(历史记忆+当前上下文)，请求分析
-    activate LLM
-    LLM-->>SpecAI: 13. 返回漏洞线索/分析结论
-    deactivate LLM
-
-    Note over SpecAI: **打包最终结果**
-    SpecAI->>Q_Final: 14. 将(分析结论+原始上下文)打包后入队
-    deactivate SpecAI
-
-    %% 最终处理 (并行)
-    par 并行输出与记忆
-        activate Reporter
-        Reporter->>Q_Final: 15a. 获取最终结果包
-        Note over Reporter: 提取"分析结论"，<br/>写入Markdown报告和终端
-        deactivate Reporter
-    and
-        activate Memory
-        Memory->>Q_Final: 15b. 获取最终结果包
-        Note over Memory: 整理"分析结论"和"原始上下文"，<br/>生成结构化的新知识
-        Memory->>VectorDB: 16. 将新知识存入长期记忆
-        deactivate Memory
+            par 并行最终处理
+                Broadcaster-->>Reporter: 14a. 广播至报告队列
+                Reporter-->>Reporter: 15a. 写入Markdown报告
+            and
+                Broadcaster-->>Memory: 14b. 广播至记忆队列
+                Memory-->>LLM_VDB: 15b. 将新发现存入记忆
+            end
+        end
     end
-
-    Note over User, Memory: 整个流程(4-16)对无数个CDP事件<br/>以流水线的方式并发进行，<br/>实现高效、不间断的分析。

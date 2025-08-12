@@ -1,16 +1,15 @@
-
 import asyncio
 
 # ① 原始事件队列
 raw_events_q = asyncio.Queue()
 
-# ② 精炼上下文队列
+# ② 精炼上下文队列 (现在是文件写入器的输入)
 refined_contexts_q = asyncio.Queue()
 
-# ③-a Soft Queue - 软漏洞分析任务队列
+# ③-a 软漏洞分析任务队列
 soft_vuln_q = asyncio.Queue()
 
-# ③-b Reverse Queue - 逆向分析任务队列
+# ③-b 逆向分析任务队列
 reverse_analysis_q = asyncio.Queue()
 
 # ④ AI分析结果的统一出口

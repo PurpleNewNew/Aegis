@@ -1,31 +1,37 @@
-# Aegis Scanner Configuration
+# Aegis扫描器配置
 
 browser:
-  # The remote debugging port for the Chrome instance you will launch.
-  # Example launch command for Chrome:
+  # 你将要启动的Chrome实例的远程调试端口。
+  # Chrome启动命令示例:
   # "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
   remote_debugging_port: 9222
 
+scanner_scope:
+  # 重要：只有在此列表中的域名才会被分析。
+  # 在这里添加你的目标应用的域名。
+  # 示例: ["example.com", "api.example.com"]
+  whitelist_domains: []
+
 ollama:
-  # The host for the Ollama service.
+  # Ollama服务的主机地址。
   host: 'http://localhost:11434'
-  # The model to use for analysis.
+  # 用于分析的模型名称。
   model: 'gemma3:12b-it-qat'
-  # Timeout for the API calls in seconds.
+  # API调用的超时时间（秒）。
   timeout: 60
 
 chromadb:
-  # Path to store the vector database files.
-  # It will be created in the project root if it doesn't exist.
+  # 存储向量数据库文件的路径。
+  # 如果不存在，将在项目根目录下创建。
   path: "./chroma_db"
-  # The name of the collection to store memories.
+  # 用于存储记忆的集合（collection）的名称。
   collection_name: "aegis_memories"
 
 reporter:
-  # Directory to save the analysis reports.
-  # It will be created in the project root if it doesn't exist.
+  # 保存分析报告的目录。
+  # 如果不存在，将在项目根目录下创建。
   output_dir: "./reports"
 
 logging:
-  # File to store the full conversation with the AI for debugging.
+  # 用于存储与AI完整对话以供调试的文件。
   ai_dialogues_file: "./logs/ai_dialogues.jsonl"

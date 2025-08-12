@@ -3,10 +3,12 @@ import logging
 import ollama
 import chromadb
 from asyncio import Queue
+from src.utils.ai_logger import log_ai_dialogue
+from src.prompts.prompt import get_soft_vuln_prompt # 导入集中的提示词函数
 
 class AISoftWorker:
     """
-    Analyzes contexts for "soft" vulnerabilities using a RAG-powered LLM call.
+    使用由RAG驱动的LLM调用来分析上下文中的“软”漏洞。
     """
 
     def __init__(self, input_q: Queue, output_q: Queue, config: dict):
@@ -15,76 +17,53 @@ class AISoftWorker:
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
         
-        # Initialize Ollama client
+        # 初始化Ollama客户端
         self.ollama_client = ollama.AsyncClient(
             host=self.config['ollama']['host'],
             timeout=self.config['ollama']['timeout']
         )
         
-        # Initialize ChromaDB client
+        # 初始化ChromaDB客户端
         try:
             self.chroma_client = chromadb.PersistentClient(path=self.config['chromadb']['path'])
             self.collection = self.chroma_client.get_or_create_collection(name=self.config['chromadb']['collection_name'])
-            self.logger.info(f"Connected to ChromaDB and got collection '{self.config['chromadb']['collection_name']}'.")
+            self.logger.info(f"已连接到ChromaDB并获取到集合 '{self.config['chromadb']['collection_name']}'.")
         except Exception as e:
-            self.logger.error(f"Failed to initialize ChromaDB: {e}", exc_info=True)
-            self.chroma_client = None # Disable DB functionality
-
-    def build_prompt(self, context, memories):
-        """
-        Builds a detailed prompt for the LLM, including context and retrieved memories.
-        """
-        prompt = f"""You are a web security expert specializing in front-end and business logic vulnerabilities. 
-Analyze the following network request for potential security flaws. 
-Focus on issues like Cross-Site Scripting (XSS), insecure direct object references (IDOR), authorization flaws, and business logic errors.\n\n--- Current Request Context ---\n\nURL: {context['url']}\n\nMethod: {context['method']}\n\nHeaders: {context['headers']}\n\nPOST Data (Hex): {context['post_data']}\n\n"""
-
-        if memories and memories.get('documents') and memories['documents'][0]:
-            prompt += "--- Relevant Historical Analysis (Memories) ---\n"
-            for mem in memories['documents'][0]:
-                prompt += f"- {mem}\n"
-            prompt += "\n"
-
-        prompt += (
-            "--- Analysis Task ---\n"
-            "1. Identify potential vulnerabilities based on the request data and historical context.\n"
-            "2. For each finding, provide a brief explanation of the vulnerability, its potential impact (Severity: Low/Medium/High/Critical), and your Confidence (in percentage).\n"
-            "3. If no vulnerabilities are found, state 'No soft vulnerabilities identified.'.\n"
-            "4. Format your response clearly."
-        )
-        return prompt
+            self.logger.error(f"初始化ChromaDB失败: {e}", exc_info=True)
+            self.chroma_client = None # 禁用数据库功能
 
     async def run(self):
-        self.logger.info("AI Soft Worker is running.")
+        self.logger.info("AI软漏洞Worker正在运行。")
         try:
             while True:
                 context = await self.input_q.get()
-                self.logger.info(f"Analyzing soft vulnerabilities for: {context['url']}")
+                self.logger.info(f"正在为 {context['url']} 分析软漏洞。")
 
-                # 1. Retrieve memories from ChromaDB
+                # 1. 从ChromaDB检索记忆
                 memories = None
                 if self.chroma_client:
                     try:
                         memories = self.collection.query(query_texts=[context['url']], n_results=3)
-                        self.logger.info(f"Retrieved {len(memories.get('documents', [[]])[0])} memories for URL.")
+                        self.logger.info(f"为URL检索到 {len(memories.get('documents', [[]])[0])} 条记忆。")
                     except Exception as e:
-                        self.logger.error(f"Error querying ChromaDB: {e}")
+                        self.logger.error(f"查询ChromaDB时出错: {e}")
 
-                # 2. Build the prompt
-                prompt = self.build_prompt(context, memories)
+                # 2. 使用集中化函数构建提示
+                prompt = get_soft_vuln_prompt(context, memories)
 
-                # 3. Generate analysis from Ollama
+                # 3. 从Ollama生成分析
                 try:
                     response = await self.ollama_client.chat(
                         model=self.config['ollama']['model'],
                         messages=[{'role': 'user', 'content': prompt}]
                     )
                     analysis_text = response['message']['content']
-                    self.logger.info(f"Ollama analysis received for {context['url']}.")
+                    self.logger.info(f"已收到对 {context['url']} 的Ollama分析。")
 
-                    # Log the conversation for debugging
+                    # 为调试记录对话
                     await log_ai_dialogue(prompt, analysis_text, self.config['logging']['ai_dialogues_file'])
 
-                    # 4. Package and send the result
+                    # 4. 打包并发送结果
                     analysis_result = {
                         'source_context': context,
                         'analysis_text': analysis_text,
@@ -93,11 +72,11 @@ Focus on issues like Cross-Site Scripting (XSS), insecure direct object referenc
                     await self.output_q.put(analysis_result)
 
                 except Exception as e:
-                    self.logger.error(f"Error communicating with Ollama: {e}")
+                    self.logger.error(f"与Ollama通信时出错: {e}")
 
                 self.input_q.task_done()
 
         except asyncio.CancelledError:
-            self.logger.info("AI Soft Worker is shutting down.")
+            self.logger.info("AI软漏洞Worker正在关闭。")
         except Exception as e:
-            self.logger.error(f"An error occurred in AISoftWorker: {e}", exc_info=True)
+            self.logger.error(f"在AISoftWorker中发生错误: {e}", exc_info=True)
