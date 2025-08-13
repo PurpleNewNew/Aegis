@@ -1,5 +1,7 @@
+
 import asyncio
 import logging
+import time # 导入time模块
 from asyncio import Queue
 from playwright.async_api import async_playwright, Page, Request, Response
 
@@ -30,6 +32,7 @@ class CDPController:
             initiator_url = request.frame.page.url
             event = {
                 'event_type': 'request',
+                'timestamp': time.time(), # 添加时间戳
                 'method': request.method,
                 'url': request.url,
                 'headers': await request.all_headers(),
@@ -47,7 +50,6 @@ class CDPController:
         处理'response'事件，专门用于捕获JavaScript文件内容。
         """
         try:
-            # 检查Content-Type是否为JavaScript
             content_type = response.headers.get('content-type', '')
             if 'javascript' in content_type or 'jscript' in content_type:
                 url = response.url
@@ -56,6 +58,7 @@ class CDPController:
                 
                 event = {
                     'event_type': 'javascript_file',
+                    'timestamp': time.time(), # 添加时间戳
                     'url': url,
                     'content': js_content,
                     'initiator_url': response.frame.page.url
@@ -69,7 +72,7 @@ class CDPController:
         try:
             self.logger.info(f"为页面设置监听器: {await page.title()}")
             page.on("request", self.handle_request)
-            page.on("response", self.handle_response) # 新增响应监听
+            page.on("response", self.handle_response)
         except Exception as e:
             self.logger.error(f"为页面设置监听器失败。页面可能已关闭。错误: {e}")
 

@@ -1,34 +1,19 @@
+
 graph TD
-    subgraph "阶段一：捕获 & 持久化"
+    subgraph "阶段一：捕获 & 关联"
         direction LR
         User[👤 用户] --> Browser(🌐 Chrome浏览器)
-        Browser -- "CDP事件流 (请求/响应)" --> Controller[CDP控制器]
-        Controller --> Q1[原始事件队列]
-        Q1 --> Filter[过滤器Worker<br/>(白名单/静态资源/JS文件)]
-        Filter --> Q2[精炼上下文队列]
-        Q2 --> Writer(Jsonl写入器)
-        Writer -- "追加写入" --> FileBuffer([📄<br/>data/capture.jsonl])
+        Browser -- "CDP事件流" --> Controller[CDP控制器]
+        Controller --> Q_Raw[原始事件队列]
+        Q_Raw --> Filter[过滤器Worker]
+        Filter --> Q_Filtered[精炼事件队列]
+        Q_Filtered --> Correlator{上下文关联器<br/>(核心大脑)}
     end
 
-    subgraph "阶段二：读取 & 分析"
+    subgraph "阶段二：整体性分析"
         direction LR
-        FileBuffer -- "实时追踪" --> Reader(Jsonl读取器)
-        Reader --> Q_Task[分析任务队列]
-        Q_Task --> Dispatcher[智能调度员]
-        Dispatcher --> Q_Soft[软漏洞队列]
-        Dispatcher --> Q_Reverse[逆向分析队列]
-        Dispatcher --> Q_JS[JS分析队列]
-
-        subgraph "并行AI分析核心 (x3)"
-            direction TB
-            Q_Soft --> AI_Soft[AI Worker - Soft]
-            Q_Reverse --> AI_Reverse[AI Worker - Reverse]
-            Q_JS --> AI_JS[AI Worker - JS]
-        end
-
-        AI_Soft -- "结构化JSON" --> Q_Out[统一AI结果队列]
-        AI_Reverse -- "结构化JSON" --> Q_Out
-        AI_JS -- "结构化JSON" --> Q_Out
+        Correlator -- "打包完整上下文" --> Q_Analysis[分析任务队列]
+        Q_Analysis --> HolisticAI[🤖 整体分析Worker]
     end
 
     subgraph "外部服务 & 日志"
@@ -40,6 +25,7 @@ graph TD
 
     subgraph "阶段三：广播 & 输出"
         direction LR
+        HolisticAI -- "结构化JSON" --> Q_Out[统一AI结果队列]
         Q_Out --> Broadcaster[广播器]
         Broadcaster --> Q_Report[报告队列]
         Broadcaster --> Q_Memory[记忆队列]
@@ -53,18 +39,12 @@ graph TD
     end
 
     %% 交互关系
-    AI_Soft -- "调用Prompt" --> Prompts
-    AI_Reverse -- "调用Prompt" --> Prompts
-    AI_JS -- "调用Prompt" --> Prompts
-    AI_Soft -- "RAG/推理" --> LLM_VDB
-    AI_Reverse -- "RAG/推理" --> LLM_VDB
-    AI_JS -- "RAG/推理" --> LLM_VDB
-    AI_Soft -- "记录对话" --> AILog
-    AI_Reverse -- "记录对话" --> AILog
-    AI_JS -- "记录对话" --> AILog
+    HolisticAI -- "调用大师级Prompt" --> Prompts
+    HolisticAI -- "RAG/推理" --> LLM_VDB
+    HolisticAI -- "记录对话" --> AILog
     Memory -- "写入记忆" --> LLM_VDB
 
     classDef stage fill:#E8F8F5,stroke:#16A085,stroke-width:2px
     classDef services fill:#FEF9E7,stroke:#F1C40F,stroke-width:2px
-    class User,Browser,FileBuffer,AILog,ReportFile,LLM_VDB,Prompts services
-    class Controller,Filter,Writer,Reader,Dispatcher,AI_Soft,AI_Reverse,AI_JS,Broadcaster,Reporter,Memory,Q1,Q2,Q_Task,Q_Soft,Q_Reverse,Q_JS,Q_Out,Q_Report,Q_Memory stage
+    class User,Browser,ReportFile,AILog,LLM_VDB,Prompts services
+    class Controller,Filter,Correlator,HolisticAI,Broadcaster,Reporter,Memory,Q_Raw,Q_Filtered,Q_Analysis,Q_Out,Q_Report,Q_Memory stage

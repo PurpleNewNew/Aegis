@@ -67,7 +67,7 @@ class MemoryWorker:
                 for finding in findings:
                     # 为每个发现创建一个简洁、有意义的记忆文档
                     memory_doc = (
-                        f"对于URL '{source_context.get('url')}', 由 '{worker_name}' 发现一个置信度为 '{finding.get('confidence')}' 的 '{finding.get('vulnerability')}' (严重性: {finding.get('severity')})。 "
+                        f"对于URL '{source_context.get('initiator_url')}', 由 '{worker_name}' 发现一个置信度为 '{finding.get('confidence')}' 的 '{finding.get('vulnerability')}' (严重性: {finding.get('severity')})。 "
                         f"推理过程: {finding.get('reasoning')}"
                     )
                     memory_id = self.create_memory_id(memory_doc)
@@ -75,7 +75,7 @@ class MemoryWorker:
                     docs_to_add.append(memory_doc)
                     ids_to_add.append(memory_id)
                     metadatas_to_add.append({
-                        'source_url': source_context.get('url'),
+                        'source_url': source_context.get('initiator_url'),
                         'vulnerability': finding.get('vulnerability'),
                         'worker': worker_name
                     })

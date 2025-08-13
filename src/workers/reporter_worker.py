@@ -43,7 +43,7 @@ class ReporterWorker:
                 self.logger.info(f"收到来自 {worker_name} 的 {len(findings)} 个发现。")
 
                 # 为这批发现创建一个报告片段
-                report_segment = f"""## 来自 {worker_name} 的分析报告\n\n**源头 URL:** `{source_context.get('url')}`\n**分析时间:** {datetime.now().isoformat()}\n\n"""
+                report_segment = f"## 来自 {worker_name} 的分析报告\n\n**源头 URL:** `{source_context.get('initiator_url')}`\n**分析时间:** {datetime.now().isoformat()}\n\n"
 
                 for finding in findings:
                     report_segment += f"""### 漏洞: {finding.get('vulnerability', 'N/A')}\n

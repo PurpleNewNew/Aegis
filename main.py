@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 import yaml
@@ -9,24 +10,18 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 # 导入队列定义
 from src.queues.queues import (
     raw_events_q,
-    refined_contexts_q,
-    soft_vuln_q,
-    reverse_analysis_q,
-    js_analysis_q, # 新增
+    filtered_events_q,
+    analysis_packages_q,
     ai_output_q,
     reporter_q,
     memory_q
 )
 
-# 导入组件
+# 导入新架构的核心组件
 from src.controller.cdp_controller import CDPController
 from src.workers.filter_worker import FilterWorker
-from src.workers.jsonl_writer_worker import JsonlWriterWorker
-from src.workers.jsonl_reader_worker import JsonlReaderWorker
-from src.workers.dispatcher_worker import Dispatcher
-from src.workers.ai_soft_worker import AISoftWorker
-from src.workers.ai_reverse_worker import AIReverseWorker
-from src.workers.js_analysis_worker import JSAnalysisWorker # 新增
+from src.workers.context_correlator import ContextCorrelator
+from src.workers.holistic_analysis_worker import HolisticAnalysisWorker
 from src.workers.broadcaster import Broadcaster
 from src.workers.reporter_worker import ReporterWorker
 from src.workers.memory_worker import MemoryWorker
@@ -35,7 +30,7 @@ async def main():
     """
     初始化并运行Aegis应用的所有组件。
     """
-    logging.info("Aegis应用正在启动...")
+    logging.info("Aegis应用正在启动 (v2.0 - 上下文感知架构)...")
 
     # --------------------------------------------------------------------
     # 步骤 1: 加载配置
@@ -54,58 +49,37 @@ async def main():
     # 如果目录不存在，则创建它们
     os.makedirs(config['reporter']['output_dir'], exist_ok=True)
     os.makedirs(os.path.dirname(config['logging']['ai_dialogues_file']), exist_ok=True)
-    os.makedirs("data", exist_ok=True)
-    capture_file_path = "data/capture.jsonl"
-
-    # 这个队列将连接文件读取器和调度器
-    analysis_tasks_q = asyncio.Queue()
 
     # 用于存放所有运行任务的列表
     tasks = []
 
     try:
         # --------------------------------------------------------------------
-        # 步骤 2: 使用文件缓冲架构初始化组件
+        # 步骤 2: 初始化新架构的组件
         # --------------------------------------------------------------------
         logging.info("正在初始化组件...")
 
-        # --- 捕获流水线 ---
+        # --- 流水线定义 ---
         controller = CDPController(output_q=raw_events_q, config=config)
-        filter_worker = FilterWorker(input_q=raw_events_q, output_q=refined_contexts_q, config=config)
-        jsonl_writer = JsonlWriterWorker(input_q=refined_contexts_q, file_path=capture_file_path)
-
-        # --- 分析流水线 ---
-        jsonl_reader = JsonlReaderWorker(output_q=analysis_tasks_q, file_path=capture_file_path)
-        dispatcher = Dispatcher(input_q=analysis_tasks_q, soft_q=soft_vuln_q, reverse_q=reverse_analysis_q, js_q=js_analysis_q)
-        
-        # 三个并行的AI分析器
-        ai_soft_worker = AISoftWorker(input_q=soft_vuln_q, output_q=ai_output_q, config=config)
-        ai_reverse_worker = AIReverseWorker(input_q=reverse_analysis_q, output_q=ai_output_q, config=config)
-        js_analysis_worker = JSAnalysisWorker(input_q=js_analysis_q, output_q=ai_output_q, config=config) # 新增
-
+        filter_worker = FilterWorker(input_q=raw_events_q, output_q=filtered_events_q, config=config)
+        correlator = ContextCorrelator(input_q=filtered_events_q, output_q=analysis_packages_q)
+        holistic_analyzer = HolisticAnalysisWorker(input_q=analysis_packages_q, output_q=ai_output_q, config=config)
         broadcaster = Broadcaster(input_q=ai_output_q, output_queues=[reporter_q, memory_q])
-        reporter_worker = ReporterWorker(input_q=reporter_q, config=config)
-        memory_worker = MemoryWorker(input_q=memory_q, config=config)
+        reporter = ReporterWorker(input_q=reporter_q, config=config)
+        memory = MemoryWorker(input_q=memory_q, config=config)
 
         # --------------------------------------------------------------------
         # 步骤 3: 为每个组件创建并调度任务
         # --------------------------------------------------------------------
         logging.info("正在调度Worker任务...")
         
-        # 捕获任务
         tasks.append(asyncio.create_task(controller.run(), name="CDPController"))
         tasks.append(asyncio.create_task(filter_worker.run(), name="FilterWorker"))
-        tasks.append(asyncio.create_task(jsonl_writer.run(), name="JsonlWriterWorker"))
-
-        # 分析任务
-        tasks.append(asyncio.create_task(jsonl_reader.run(), name="JsonlReaderWorker"))
-        tasks.append(asyncio.create_task(dispatcher.run(), name="Dispatcher"))
-        tasks.append(asyncio.create_task(ai_soft_worker.run(), name="AISoftWorker"))
-        tasks.append(asyncio.create_task(ai_reverse_worker.run(), name="AIReverseWorker"))
-        tasks.append(asyncio.create_task(js_analysis_worker.run(), name="JSAnalysisWorker")) # 新增
+        tasks.append(asyncio.create_task(correlator.run(), name="ContextCorrelator"))
+        tasks.append(asyncio.create_task(holistic_analyzer.run(), name="HolisticAnalysisWorker"))
         tasks.append(asyncio.create_task(broadcaster.run(), name="Broadcaster"))
-        tasks.append(asyncio.create_task(reporter_worker.run(), name="ReporterWorker"))
-        tasks.append(asyncio.create_task(memory_worker.run(), name="MemoryWorker"))
+        tasks.append(asyncio.create_task(reporter.run(), name="ReporterWorker"))
+        tasks.append(asyncio.create_task(memory.run(), name="MemoryWorker"))
 
         # --------------------------------------------------------------------
         # 步骤 4: 并发运行所有任务
