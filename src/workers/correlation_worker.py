@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 import os
@@ -8,7 +9,6 @@ import json
 from asyncio import Queue
 from src.utils.ai_logger import log_ai_dialogue
 from src.prompts.prompt import get_correlation_prompt
-from ..tool_code import run_shell_command # Assuming run_shell_command is available
 
 class CorrelationWorker:
     """
@@ -55,16 +55,19 @@ class CorrelationWorker:
     async def _get_analysis_from_cli(self, prompt: str) -> str:
         cli_config = self.config['llm_service']['cli_config']
         analysis_text = ""
-        # 使用临时文件来处理prompt和输出
-        with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".txt", encoding='utf-8') as prompt_file,
-             tempfile.NamedTemporaryFile(mode='r', delete=False, suffix=".txt", encoding='utf-8') as output_file:
-            
-            prompt_file_path = prompt_file.name
-            output_file_path = output_file.name
-            await prompt_file.write(prompt)
-            await prompt_file.flush()
+        prompt_file_path = None
+        output_file_path = None
 
         try:
+            # 创建临时文件并获取路径
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".txt", encoding='utf-8') as prompt_file:
+                prompt_file_path = prompt_file.name
+                await prompt_file.write(prompt)
+            
+            with tempfile.NamedTemporaryFile(mode='r', delete=False, suffix=".txt", encoding='utf-8') as output_file:
+                output_file_path = output_file.name
+
+            # 构建并执行命令
             command = cli_config['command_template'].format(
                 prompt_file=prompt_file_path,
                 output_file=output_file_path
@@ -72,16 +75,24 @@ class CorrelationWorker:
             self.logger.info(f"执行CLI命令: {command}")
             self.logger.info(f"要实时查看输出, 请在另一个终端运行: tail -f {output_file_path}")
             
+            # run_shell_command 是一个可用的全局工具
             result = await run_shell_command(command, description="Call external AI CLI")
+
+            # 从输出文件读取结果
             if result.get('exit_code') == 0:
-                analysis_text = await output_file.read()
+                with open(output_file_path, 'r', encoding='utf-8') as f:
+                    analysis_text = f.read()
             else:
-                self.logger.error(f"CLI命令执行失败: {result.get('stderr')}")
-                analysis_text = f"CLI命令执行失败: {result.get('stderr')}"
+                err_msg = f"CLI命令执行失败: {result.get('stderr')}"
+                self.logger.error(err_msg)
+                analysis_text = err_msg
 
         finally:
-            os.remove(prompt_file_path)
-            os.remove(output_file_path)
+            # 清理临时文件
+            if prompt_file_path and os.path.exists(prompt_file_path):
+                os.remove(prompt_file_path)
+            if output_file_path and os.path.exists(output_file_path):
+                os.remove(output_file_path)
         
         return analysis_text
 
