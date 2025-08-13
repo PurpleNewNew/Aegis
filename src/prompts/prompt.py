@@ -1,99 +1,89 @@
-
 """
 集中化模块，用于存储和生成面向LLM的高度优化的提示词。
+包含两阶段分析所需的提示：JS摘要 和 关联分析。
 """
 import json
 from datetime import datetime
 
-# --- 智能预处理辅助函数 ---
-
-def is_likely_library(url: str) -> bool:
-    """通过URL启发式地判断一个JS文件是否为第三方库。"""
-    url_lower = url.lower()
-    library_indicators = [
-        '.min.js', 'jquery', 'bootstrap', 'angular', 'react', 
-        'vue.js', 'chart.js', 'd3.js', 'moment.js', 'lodash', 
-        'crypto-js', 'jsencrypt', 'forge.min', 'cdn.jsdelivr.net', 
-        'cdnjs.cloudflare.com', 'unpkg.com', 'googleapis.com'
-    ]
-    return any(indicator in url_lower for indicator in library_indicators)
-
-def get_holistic_analysis_prompt(context_package: dict, memories: dict) -> str:
+def get_js_summary_prompt(js_url: str, js_content: str) -> str:
     """
-    构建一个“大师级”的详细提示词，用于对一个完整的页面上下文进行整体性关联分析，
-    并要求以JSON格式输出。
+    构建一个提示词，用于让LLM总结一个JS文件的功能。
+    """
+    # 截断以防止上下文溢出，因为摘要任务相对简单
+    max_len = 15000
+    if len(js_content) > max_len:
+        js_content = js_content[:max_len] + "\n... (代码过长已被截断) ..."
+
+    prompt_lines = [
+        "你是一名精通JavaScript的资深软件工程师。",
+        "",
+        "**任务**:",
+        f"请简要总结以下从URL `{js_url}` 获取的JavaScript文件的核心功能。你的总结应当清晰、简洁，并突出任何与安全相关的方面。",
+        "",
+        "**分析要点**:",
+        "1.  **核心功能**: 这个JS文件的主要目的是什么？（例如：处理用户认证、UI交互、数据加密、广告追踪等）",
+        "2.  **关键函数/变量**: 列出1-3个最关键的函数或变量名，并简要说明其作用。",
+        "3.  **安全相关元素**: 是否发现了任何看起来像API密钥、认证令牌、加密函数调用、或API端点的东西？只需列出，无需深入分析。",
+        "",
+        "**JavaScript 代码内容**:",
+        f"```javascript\n{js_content}\n```",
+        "",
+        "**关键指令**: 你的回复必须是纯文本，直接回答上述三个问题即可，不需要任何额外的寒暄或解释。"
+    ]
+    return "\n".join(prompt_lines)
+
+def get_correlation_prompt(context_package: dict, memories: dict) -> str:
+    """
+    构建一个“大师级”的详细提示词，用于对一个包含JS摘要的上下文进行整体性关联分析。
     """
     initiator_url = context_package.get('initiator_url')
     requests = context_package.get('requests', [])
-    js_files = context_package.get('js_files', [])
+    # 注意：现在接收的是带有摘要的JS文件对象
+    summarized_js_files = context_package.get('summarized_js', [])
 
     # --- 1. 构建事件叙事 ---
-    all_events = sorted(requests + js_files, key=lambda x: x.get('timestamp', 0))
-    event_narrative_lines = ["\n**事件时间线（按发生顺序）**:" ]
-    if not all_events:
-        event_narrative_lines.append("未捕获到任何事件。")
+    # 注意：这里我们只有请求事件，因为JS文件已被预处理
+    event_narrative_lines = ["\n**此页面生命周期中发生的网络请求（按大致顺序）**:"]
+    if not requests:
+        event_narrative_lines.append("未捕获到任何网络请求。" )
     else:
-        for i, event in enumerate(all_events):
-            ts = datetime.fromtimestamp(event.get('timestamp', 0)).strftime('%H:%M:%S')
-            if event.get('event_type') == 'javascript_file':
-                event_narrative_lines.append(f"{i+1}. `[{ts}]` **加载JS文件**: `{event.get('url')}`")
-            elif event.get('event_type') == 'request':
-                event_narrative_lines.append(f"{i+1}. `[{ts}]` **发出网络请求**: `{event.get('method')}` `{event.get('url')}`")
+        # 按时间戳对请求排序
+        sorted_requests = sorted(requests, key=lambda x: x.get('timestamp', 0))
+        for i, req in enumerate(sorted_requests):
+            ts = datetime.fromtimestamp(req.get('timestamp', 0)).strftime('%H:%M:%S')
+            event_narrative_lines.append(f"{i+1}. `[{ts}]` **发出网络请求**: `{req.get('method')}` `{req.get('url')}`")
     event_narrative = "\n".join(event_narrative_lines)
 
-    # --- 2. 智能分离和处理JS文件 ---
-    app_js_files = [f for f in js_files if not is_likely_library(f.get('url', ''))]
-    lib_js_files = [f for f in js_files if is_likely_library(f.get('url', ''))]
-
-    # 2a. 构建第三方库依赖清单
-    library_section_lines = ["\n**第三方库依赖清单**:" ]
-    if not lib_js_files:
-        library_section_lines.append("- 未发现已知的第三方库依赖。")
+    # --- 2. 构建JS代码摘要部分 ---
+    js_summary_section_lines = ["\n**此页面加载的JS文件的AI摘要（用于关联分析）**:"]
+    if not summarized_js_files:
+        js_summary_section_lines.append("无相关的JS文件摘要。" )
     else:
-        for lib in lib_js_files:
-            library_section_lines.append(f"- `{lib.get('url')}`")
-    library_section = "\n".join(library_section_lines)
-
-    # 2b. 构建应用自身的JS代码审查部分
-    js_code_section_lines = ["\n**捕获到的应用自有JavaScript文件内容（用于代码审计）**:"]
-    if not app_js_files:
-        js_code_section_lines.append("未捕获到应用自身的JS文件。")
-    else:
-        for i, js_file in enumerate(app_js_files):
+        for i, js_file in enumerate(summarized_js_files):
             js_url = js_file.get('url')
-            js_content = js_file.get('content', '')
-            max_len = 12000
-            if len(js_content) > max_len:
-                js_content = js_content[:max_len] + "\n... (代码过长已被截断) ..."
-            js_code_section_lines.append(f"--- 应用JS文件 {i+1}: `{js_url}` ---")
-            js_code_section_lines.append(f"```javascript\n{js_content}\n```")
-    js_code_section = "\n".join(js_code_section_lines)
+            summary = js_file.get('summary', '摘要生成失败。')
+            js_summary_section_lines.append(f"--- JS文件摘要 {i+1}: `{js_url}` ---")
+            js_summary_section_lines.append(summary)
+    js_summary_section = "\n".join(js_summary_section_lines)
 
     # --- 3. 构建历史记忆部分 ---
-    memory_section_lines = ["\n**历史分析（记忆）**:" ]
+    memory_section_lines = ["\n**历史分析（记忆）**:"]
     if memories and memories.get('documents') and memories['documents'][0]:
         memory_section_lines.append("以下是从该URL或相似端点过往的分析中提取的记忆，请将其作为重要参考：")
         for mem in memories['documents'][0]:
             memory_section_lines.append(f"- {mem}")
     else:
-        memory_section_lines.append("- 无相关历史记忆。")
+        memory_section_lines.append("- 无相关历史记忆。" )
     memory_section = "\n".join(memory_section_lines)
 
     # --- 4. 构建安全的JSON范例 ---
     example_finding = json.dumps([
         {
-            "vulnerability": "硬编码在JS中的密钥被用于API请求",
+            "vulnerability": "不安全的密码加密传输",
             "confidence": "High",
-            "severity": "Critical",
-            "reasoning": "在`app.js`中发现硬编码的API密钥`const API_KEY = \"sk_...\"`。此密钥随后被用于构造发往`api.example.com`的请求头。",
-            "suggestion": "立即废止此密钥，并从前端代码中移除。通过后端代理调用需要认证的API。"
-        },
-        {
-            "vulnerability": "依赖存在已知漏洞的库 (CVE-2018-9206)",
-            "confidence": "High",
-            "severity": "Medium",
-            "reasoning": "依赖清单中包含了`jquery-3.2.1.min.js`。该版本的jQuery存在一个已知的跨站脚本（XSS）漏洞(CVE-2018-9206)。",
-            "suggestion": "将jQuery库升级到3.4.0或更高版本以修复此漏洞。"
+            "severity": "High",
+            "reasoning": "JS文件摘要中提到 `auth.js` 使用 `encryptPassword` 函数处理密码，但摘要显示该函数只是对密码进行了Base64编码。在网络请求中，发往 `/api/login` 的POST请求的body中，`password` 字段的值确实是一个Base64编码的字符串。Base64是编码而非加密，密码在传输过程中相当于明文，这是严重的安全漏洞。",
+            "suggestion": "前端应使用非对称加密（如RSA）的用户公钥对密码进行加密，或在安全的HTTPS连接上直接传输密码原文，由后端进行哈希处理。绝不能使用Base64等编码方式伪装成加密。"
         }
     ], indent=2, ensure_ascii=False)
 
@@ -102,18 +92,16 @@ def get_holistic_analysis_prompt(context_package: dict, memories: dict) -> str:
         f"你是一名顶级的、全栈的渗透测试专家，你的任务是像一个真实的人类黑客一样思考，对一个Web页面的**完整用户会话**进行全面的、上下文感知的安全审计。",
         "",
         "**核心任务**:",
-        "请**关联分析**以下所有信息，发现单个事件无法暴露的深层次漏洞。你必须**连接这些信息点**。",
+        "请**关联分析**以下所有信息：网络请求、相关的JS代码摘要、以及历史记忆，以发现单个事件无法暴露的深层次漏洞。",
         "",
         f"**分析场景**: 正在审计的页面是 `{initiator_url}`",
         event_narrative,
-        library_section, # 新增
-        js_code_section,
+        js_summary_section,
         memory_section,
         "",
-        "**关键关联分析指令 (请一步步思考并回答)**:",
-        "1.  **依赖漏洞分析**: 检查“第三方库依赖清单”，列出的库是否存在任何已知的、公开的漏洞（CVEs）?",
-        "2.  **数据流追踪**: 仔细检查“应用自有JS文件内容”，寻找其中定义的变量、函数或加密逻辑。然后，在“事件时间线”中，判断这些JS定义的元素（如API密钥、加密后的密码）是否出现在了后续发出的网络请求中?",
-        "3.  **因果链/逻辑漏洞分析**: 整个事件序列是否构成了一个完整的用户操作（如登录、搜索）？这个流程是否存在逻辑缺陷（如可以绕过步骤）？后续请求是否不安全地依赖于之前请求的返回数据？",
+        "**关键关联分析指令**:",
+        "1.  **数据流追踪**: 结合JS摘要中提到的功能（如加密、参数构造）和网络请求的实际参数，判断是否存在数据在传输前处理不当（如加密薄弱、敏感信息拼接）的情况？",
+        "2.  **逻辑漏洞分析**: 结合JS摘要中提到的业务逻辑和实际发出的网络请求序列，判断是否存在可以被利用的流程缺陷？",
         "",
         "**输出要求**:",
         "你的回答**必须**是一个JSON对象数组。每个对象代表一个发现。如果未发现任何漏洞，则返回一个空数组 `[]`。",

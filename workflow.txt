@@ -1,49 +1,36 @@
-
 sequenceDiagram
-    participant User as 用户
-    participant Browser as 浏览器
+    participant Filter as 过滤器
+    participant Summarizer as 🤖 JS摘要器
     participant Correlator as 上下文关联器
-    participant HolisticAI as 整体分析Worker
-    participant Prompts as prompts.py
-    participant LLM_VDB as Ollama & ChromaDB
-    participant Reporter as 报告Worker
-    participant Memory as 记忆Worker
+    participant CorrelationAI as 🤖 关联分析器
+    participant LLM as LLM服务
+    participant Reporter as 报告/记忆器
 
-    Note over User, Memory: 整个流程由一个中央的“上下文关联器”驱动，它负责收集并打包数据。
+    Note over Filter, Reporter: Aegis v4 - "摘要-关联" 工作流
 
-    User->>Browser: 1. 浏览目标网站 (例如, 打开登录页)
-    Browser-->>Correlator: 2. 发送页面所有相关事件 (JS文件, 网络请求等)
-    
+    Filter->>Summarizer: 1. 发现JS文件，发送进行摘要
+    activate Summarizer
+    Summarizer->>LLM: 2. 请求对JS代码进行摘要
+    LLM-->>Summarizer: 3. 返回JS代码摘要
+    Summarizer->>Correlator: 4. 将(JS事件+摘要)发送给关联器
+    deactivate Summarizer
+
+    loop 并行发生
+        Filter->>Correlator: 5. 发现网络请求，直接发送给关联器
+    end
+
     activate Correlator
-    Note over Correlator: 持续收集与登录页相关的所有事件，<br/>构建一个完整的“页面扫描上下文”。
+    Note over Correlator: 持续收集网络请求和“已摘要的JS”<br/>直到满足触发条件 (关键行为/超时)
     deactivate Correlator
-
-    User->>Browser: 3. 执行关键操作 (例如, 点击登录按钮)
-    Browser-->>Correlator: 4. 发送登录时的POST请求事件
-
-    activate Correlator
-    Note over Correlator: 收到关键操作的信号，认为上下文已完整。
-    Correlator->>HolisticAI: 5. **打包**所有相关信息(JS代码, 登录请求等)，<br/>作为一个“整体分析任务”发送。
-    deactivate Correlator
-
-    activate HolisticAI
-    HolisticAI->>Prompts: 6. 获取“大师级”Prompt
-    Note over HolisticAI: 开始RAG流程
-    HolisticAI->>LLM_VDB: 7. 查询与当前上下文相关的记忆
-    LLM_VDB-->>HolisticAI: 8. 返回记忆片段
     
-    Note over HolisticAI: **将JS代码、网络请求、历史记忆等所有信息<br/>组合成一个极其丰富的Prompt**
-    HolisticAI->>LLM_VDB: 9. 请求进行**整体性**关联分析
-    LLM_VDB-->>HolisticAI: 10. 返回结构化的JSON分析结果
-    deactivate HolisticAI
+    Correlator->>CorrelationAI: 6. 打包发送完整的上下文（包含请求和JS摘要）
+    activate CorrelationAI
+    Note over CorrelationAI: 开始最终的关联分析
+    CorrelationAI->>LLM: 7. (RAG后)发送包含摘要的大师级Prompt
+    LLM-->>CorrelationAI: 8. 返回最终的JSON格式漏洞报告
+    deactivate CorrelationAI
 
-    HolisticAI->>Reporter: 11a. (通过广播器)发送结果到报告器
+    CorrelationAI->>Reporter: 9. (通过广播器)将最终结果发送到输出模块
     activate Reporter
-    Reporter->>Reporter: 12a. 遍历并写入所有发现
+    Reporter->>Reporter: 10. 解析JSON并生成报告/存入记忆
     deactivate Reporter
-
-    HolisticAI->>Memory: 11b. (通过广播器)发送结果到记忆器
-    activate Memory
-    Memory->>LLM_VDB: 12b. 遍历并将新知识存入记忆
-    deactivate Memory
-

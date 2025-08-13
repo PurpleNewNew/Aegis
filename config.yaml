@@ -1,37 +1,44 @@
+
 # Aegis扫描器配置
 
 browser:
   # 你将要启动的Chrome实例的远程调试端口。
-  # Chrome启动命令示例:
-  # "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
   remote_debugging_port: 9222
 
 scanner_scope:
   # 重要：只有在此列表中的域名/IP才会被分析。
-  # 在这里添加你的目标应用的域名/IP。
-  # 示例: ["example.com", "api.example.com", "127.0.0.1"]
   whitelist_domains: ["121.43.58.124"]
 
 llm_service:
-  # LM-Studio OpenAI兼容API的地址。
-  base_url: "http://localhost:1234/v1"
-  # 在LM-Studio中加载的模型标识符。
-  model_name: "openai/gpt-oss-20b"
-  # 本地服务通常不需要API密钥，但openai库需要一个值。
-  api_key: "lm-studio"
-  # API调用的超时时间（秒）。
-  timeout: 300
+  # AI服务模式: 'api' 或 'cli'
+  # 'api': 连接到本地的、与OpenAI兼容的API服务 (如LM Studio, Ollama的openai兼容模式)。
+  # 'cli': 通过命令行调用一个外部AI工具 (如Gemini-CLI, Claude-CLI)。
+  mode: 'api' # 在这里切换模式
+
+  # --- API模式配置 (用于LM Studio等) ---
+  api_config:
+    base_url: "http://localhost:1234/v1"
+    model_name: "local-model" # 在LM Studio中加载的模型标识符
+    api_key: "lm-studio"
+    timeout: 300
+
+  # --- CLI模式配置 (用于Gemini-CLI等) ---
+  cli_config:
+    # 命令行模板。程序会创建临时文件并替换占位符。
+    # {prompt_file}: Prompt输入文件的路径。
+    # {output_file}: AI输出的重定向文件路径。
+    # 示例: "gemini-cli -p {prompt_file} > {output_file} 2>&1"
+    command_template: "gemini-cli -p {prompt_file} > {output_file} 2>&1"
+    # 命令行执行的超时时间（秒）。
+    timeout: 600
 
 chromadb:
   # 存储向量数据库文件的路径。
-  # 如果不存在，将在项目根目录下创建。
   path: "./chroma_db"
-  # 用于存储记忆的集合（collection）的名称。
   collection_name: "aegis_memories"
 
 reporter:
   # 保存分析报告的目录。
-  # 如果不存在，将在项目根目录下创建。
   output_dir: "./reports"
 
 logging:

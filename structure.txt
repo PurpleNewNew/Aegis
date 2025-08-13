@@ -1,50 +1,53 @@
-
 graph TD
-    subgraph "阶段一：捕获 & 关联"
+    subgraph "阶段一：捕获 & 过滤"
         direction LR
         User[👤 用户] --> Browser(🌐 Chrome浏览器)
         Browser -- "CDP事件流" --> Controller[CDP控制器]
         Controller --> Q_Raw[原始事件队列]
         Q_Raw --> Filter[过滤器Worker]
-        Filter --> Q_Filtered[精炼事件队列]
-        Q_Filtered --> Correlator{上下文关联器<br/>(核心大脑)}
     end
 
-    subgraph "阶段二：整体性分析"
+    subgraph "阶段二：AI预处理 (JS摘要)"
         direction LR
-        Correlator -- "打包完整上下文" --> Q_Analysis[分析任务队列]
-        Q_Analysis --> HolisticAI[🤖 整体分析Worker]
+        Filter -- "JS文件" --> Q_JS_Summarize[待摘要JS队列]
+        Q_JS_Summarize --> Summarizer[🤖 JS摘要器Worker]
+        Summarizer -- "调用摘要Prompt" --> Prompts([📄 prompts.py])
+        Summarizer -- "请求摘要" --> LLM_VDB[LLM服务]
+        Summarizer -- "(JS事件 + 摘要)" --> Q_JS_Summarized[已摘要JS队列]
     end
 
-    subgraph "外部服务 & 日志"
+    subgraph "阶段三：上下文关联"
         direction TB
-        Prompts([📄<br/>prompts.py])
-        LLM_VDB[LLM服务 (Ollama)<br/>&<br/>向量数据库 (ChromaDB)]
-        AILog([📄<br/>logs/ai_dialogues.jsonl])
+        Filter -- "网络请求" --> Q_Requests[网络请求队列]
+        subgraph "中央关联器"
+            direction LR
+            Q_Requests --> Correlator{上下文关联器}
+            Q_JS_Summarized --> Correlator
+        end
+        Correlator -- "打包完整上下文" --> Q_Package[分析包队列]
     end
 
-    subgraph "阶段三：广播 & 输出"
+    subgraph "阶段四：AI最终关联分析"
         direction LR
-        HolisticAI -- "结构化JSON" --> Q_Out[统一AI结果队列]
+        Q_Package --> CorrelationAI[🤖 关联分析Worker]
+        CorrelationAI -- "调用关联Prompt" --> Prompts
+        CorrelationAI -- "RAG/推理" --> LLM_VDB
+        CorrelationAI -- "记录对话" --> AILog([📄 logs/...])
+        CorrelationAI -- "结构化JSON" --> Q_Out[统一AI结果队列]
+    end
+
+    subgraph "阶段五：输出"
+        direction LR
         Q_Out --> Broadcaster[广播器]
         Broadcaster --> Q_Report[报告队列]
         Broadcaster --> Q_Memory[记忆队列]
-
-        subgraph "并行最终处理"
-            direction TB
-            Q_Report --> Reporter(报告生成器)
-            Q_Memory --> Memory(记忆沉淀器)
-        end
-        Reporter -- "写入结构化报告" --> ReportFile([📄<br/>reports/*.md])
+        Q_Report --> Reporter(报告生成器)
+        Q_Memory --> Memory(记忆沉淀器)
+        Reporter --> ReportFile([📄 reports/...])
+        Memory -- "写入记忆" --> LLM_VDB
     end
-
-    %% 交互关系
-    HolisticAI -- "调用大师级Prompt" --> Prompts
-    HolisticAI -- "RAG/推理" --> LLM_VDB
-    HolisticAI -- "记录对话" --> AILog
-    Memory -- "写入记忆" --> LLM_VDB
 
     classDef stage fill:#E8F8F5,stroke:#16A085,stroke-width:2px
     classDef services fill:#FEF9E7,stroke:#F1C40F,stroke-width:2px
     class User,Browser,ReportFile,AILog,LLM_VDB,Prompts services
-    class Controller,Filter,Correlator,HolisticAI,Broadcaster,Reporter,Memory,Q_Raw,Q_Filtered,Q_Analysis,Q_Out,Q_Report,Q_Memory stage
+    class Controller,Filter,Summarizer,Correlator,CorrelationAI,Broadcaster,Reporter,Memory,Q_Raw,Q_Requests,Q_JS_Summarize,Q_JS_Summarized,Q_Package,Q_Out,Q_Report,Q_Memory stage
