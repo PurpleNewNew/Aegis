@@ -500,7 +500,7 @@ class ShadowTestExecutor:
         await browser.evaluate(f"""
             // 尝试覆盖原始密钥
             window.{test['key_variable']} = '{test['malicious_key']}';
-        """)
+        """
         
         # 2. 触发加密操作
         await browser.click(test['trigger_selector'])
@@ -677,3 +677,89 @@ class ContextCache:
 5. **添加智能缓存** - 避免重复分析
 
 这样的设计真正实现了CDP、网络和AI的有机结合，能够挖掘出复杂的逻辑漏洞！
+
+---
+## 核心机制：通过“交互关联ID”实现上下文的重建与合成
+
+### 问题背景
+AI模型本身是“无状态”的，它无法像人类一样“记住”一个操作的完整过程。而安全分析恰恰需要理解一个有时序、有因果的复杂上下文（例如：用户A点击了按钮B，触发了函数C的调用，函数C又调用了函数D，最终发出了网络请求E）。本机制旨在解决这个核心矛盾。
+
+**核心思想**：我们不强迫AI去“记住”事件流，而是为AI**“重建”和“合成”一个完整的、包含所有因果关系的结构化上下文快照**。我们不给AI看零散的事件，而是给它看一张“犯罪现场的全景照片”。
+
+### 第1步：事件捕获与标记 (The Collector)
+这是信息收集的前端。当用户产生一次关键交互（比如点击登录按钮）时，系统会立即生成一个唯一的 **“交互关联ID” (Interaction Correlation ID - ICID)**，例如 `icid-click-login-1678886400`。
+
+然后，系统会开启一个短暂的 **“收集窗口”**（比如3秒）。在此窗口内，所有不同的探针捕获到的事件，都会被**强制标记**上这个激活的ICID。
+
+- **`CDPController`**: 捕获到`click`事件，标记上ICID。
+- **`CDPDebugger`**: 在接下来的几百毫秒内，可能会因为JS执行而触发多次`Debugger.paused`事件（例如，`login()` -> `validate()` -> `encrypt()`），**每一次暂停**事件都会被标记上**同一个ICID**。
+- **`js_hooks.js` (IAST)**: 如果`innerHTML`或`eval`等危险函数被调用，探针会上报一个安全警报，这个警报也会被标记上同一个ICID。
+- **网络监听器**: 所有在这期间发出的网络请求（`Network.requestWillBeSent`），同样被标记上ICID。
+
+所有这些被标记的、类型各异的原始事件，都被统一扔进一个原始事件队列中。
+
+### 第2步：事件关联与分组 (The Correlator)
+后台有一个专门的`CorrelationWorker`。它的工作很简单：从原始事件队列中取出事件，然后按照它们的`ICID`进行分组。
+
+当一个ICID的收集窗口（3秒）结束后，`CorrelationWorker`就得到了与“用户那一次点击”相关的所有事件的完整集合。这个集合就是我们分析的基础。
+
+### 第3. 上下文合成与结构化 (The Synthesizer)
+这是最关键的一步。`CorrelationWorker`拿到一个ICID的事件组后，并不直接把它们丢给AI，而是进行“合成”，生成一个高度结构化的 **“关联交互快照 (Correlated Interaction Snapshot)”**。
+
+这个快照的结构大概是这样的：
+```json
+{
+  "interaction_correlation_id": "icid-click-login-12345",
+  "trigger_event": {
+    "type": "click",
+    "selector": "button#login-btn",
+    "timestamp": "2023-03-15T12:00:00.000Z"
+  },
+  "synthesized_context": {
+    "call_tree": {
+      "function": "login_handler",
+      "variables": [{"name": "username", "value": "admin"}],
+      "children": [
+        {
+          "function": "encrypt_password",
+          "variables": [{"name": "plaintext", "value": "admin_password"}],
+          "children": []
+        }
+      ]
+    },
+    "network_requests": [
+      {
+        "url": "/api/login",
+        "method": "POST",
+        "payload": {"data": "U2FsdGVkX1..."},
+        "triggered_by_function": "login_handler" 
+      }
+    ],
+    "iast_alerts": [
+      {
+        "sink": "innerHTML",
+        "value": "欢迎, admin!",
+        "triggered_by_function": "update_welcome_message"
+      }
+    ]
+  },
+  "raw_event_timeline": [ /* ... 原始事件列表 ... */ ]
+}
+```
+
+**如何应对复杂函数连续调用？**
+
+这就是`call_tree`字段的作用。当`Synthesizer`处理一个ICID的事件组时，如果发现有多个`Debugger.paused`事件，它会：
+1.  根据CDP提供的调用栈信息（`callFrames`），重建出这些暂停事件之间的父子关系。
+2.  `login_handler`的暂停是第一次，成为树的根。
+3.  `encrypt_password`的暂停是第二次，且位于`login_handler`的调用栈之内，所以成为它的子节点。
+4.  通过这种方式，**我们将一个扁平的事件列表，转换成了一个能反映真实执行逻辑的、有层次的树状结构**。AI看到这个树，就能立刻明白函数的调用关系。
+
+### 第4步：AI分析 (The Analyzer)
+最后，这个**经过合成的、结构化的“关联交互快照”**，作为一个完整的JSON对象，被送入AI的`prompt`中。
+
+现在，我们给AI的指令不再是“请分析这些零散的事件”，而是：
+
+> “你是一名安全专家。当用户点击了登录按钮后，我们捕获到了一个完整的交互快照。快照显示，`login_handler`函数被调用，它内部又调用了`encrypt_password`函数，并最终触发了一个到`/api/login`的POST请求。请基于这个完整的因果链，分析是否存在安全漏洞。”
+
+通过这个流程，我们**用一个外部的、强大的“合成器”程序，为无状态的AI预处理好了一切**。AI不需要自己去记忆和关联，它只需要在拿到这张“全景照片”后，发挥它最擅长的、基于复杂上下文的推理能力即可。
