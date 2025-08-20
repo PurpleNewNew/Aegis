@@ -3,7 +3,8 @@ import logging
 import json
 import os
 import aiofiles
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
+from asyncio import Task
 from openai import AsyncOpenAI
 from playwright.async_api import Page, BrowserContext
 
@@ -17,7 +18,6 @@ from src.utils.ai_logger import log_ai_dialogue
 class InteractionWorker:
     """
     无感被动交互分析器，只在用户进行页面交互操作时进行快照+分析。
-    不进行自主决策，只对用户交互的功能点进行深入安全分析。
     """
 
     def __init__(self, config: dict, browser_pool: BrowserPool, concurrency_semaphore: asyncio.Semaphore, input_q, output_q, debug_events_q=None):
@@ -29,6 +29,8 @@ class InteractionWorker:
         self.debug_events_q = debug_events_q
         self.logger = logging.getLogger(self.__class__.__name__)
         self.js_hook_script = ""
+        self.iast_findings: List[Dict[str, Any]] = []
+        self._debug_listener_task: Optional[Task] = None
         
         passive_config = config.get('investigation_manager', {}).get('passive_mode', {})
         self.analysis_depth = passive_config.get('analysis_depth', 'deep')
@@ -45,19 +47,15 @@ class InteractionWorker:
         self.report_interval = 60
         self.target_url = None
         
-        self.logger.info(f"InteractionWorker初始化完成，分析深度: {self.analysis_depth}, 交互类型: {self.interaction_types}")
-        
         llm_config = self.config.get('llm_service', {})
         if llm_config and llm_config.get('api_config'):
-            self.llm_client = AsyncOpenAI(
-                base_url=llm_config['api_config'].get('base_url'),
-                api_key=llm_config['api_config'].get('api_key')
-            )
+            self.llm_client = AsyncOpenAI(base_url=llm_config['api_config'].get('base_url'), api_key=llm_config['api_config'].get('api_key'))
         else:
             self.llm_client = None
 
     async def run(self):
         await self._load_js_hooks()
+        self._debug_listener_task = asyncio.create_task(self._listen_for_debug_events())
         self.logger.info("InteractionWorker 开始运行，等待交互事件...")
         try:
             while True:
@@ -68,7 +66,20 @@ class InteractionWorker:
         except asyncio.CancelledError:
             self.logger.info("InteractionWorker 任务被取消")
         finally:
+            if self._debug_listener_task and not self._debug_listener_task.done():
+                self._debug_listener_task.cancel()
             self.logger.info("InteractionWorker 已停止运行")
+
+    async def _listen_for_debug_events(self):
+        self.logger.info("IAST/CDP事件监听器已启动。" )
+        try:
+            while True:
+                debug_event = await self.debug_events_q.get()
+                self.logger.info(f"接收到IAST/CDP调试事件: {debug_event}")
+                self.iast_findings.append(debug_event)
+                self.debug_events_q.task_done()
+        except asyncio.CancelledError:
+            self.logger.info("IAST/CDP事件监听器已关闭。" )
 
     async def handle_interaction_event(self, event: Dict[str, Any]):
         if not self.auto_security_testing or event.get('interaction_type') not in self.interaction_types:
@@ -82,7 +93,7 @@ class InteractionWorker:
         try:
             async with aiofiles.open('src/tools/js_hooks.js', mode='r', encoding='utf-8') as f:
                 self.js_hook_script = await f.read()
-                self.logger.info("IAST JS Hook脚本加载成功。")
+                self.logger.info("IAST JS Hook脚本加载成功。" )
         except Exception as e:
             self.logger.error(f"加载IAST JS Hook脚本失败: {e}")
 
@@ -186,7 +197,7 @@ class InteractionWorker:
             'timestamp': asyncio.get_event_loop().time()
         }
         await self.output_q.put(report_data)
-        self.logger.info(f"已输出包含 {len(self.cumulative_findings)} 个发现的累积报告。")
+        self.logger.info(f"已输出包含 {len(self.cumulative_findings)} 个发现的累积报告。" )
         self.cumulative_findings = []
 
     async def _create_interaction_snapshot(self, page: Page, event: Dict[str, Any]) -> Dict[str, Any]:
@@ -208,6 +219,9 @@ class InteractionWorker:
     async def _perform_targeted_analysis(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
         analysis_results = {'sast_findings': snapshot['sast_results']}
         if self.analysis_depth == 'deep':
+            self.iast_findings.clear()
+            await asyncio.sleep(0.5)
+
             results = await asyncio.gather(
                 self._analyze_network_packets(page, snapshot, event),
                 self._run_shadow_browser_test(page, snapshot, event),
@@ -215,6 +229,10 @@ class InteractionWorker:
             )
             analysis_results['network_packet_analysis'] = results[0] if not isinstance(results[0], Exception) else None
             analysis_results['shadow_browser_test_results'] = results[1] if not isinstance(results[1], Exception) else None
+            
+            analysis_results['iast_findings'] = self.iast_findings.copy()
+            self.iast_findings.clear()
+
         if self.enable_llm_analysis:
             analysis_results['llm_analysis'] = await self._perform_llm_analysis(snapshot, event, analysis_results)
         return analysis_results
@@ -242,7 +260,6 @@ class InteractionWorker:
             return None
 
     async def _run_shadow_browser_test(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        # This can be expanded with more DAST tests
         return {'security_findings': []}
 
     async def _perform_llm_analysis(self, snapshot: Dict[str, Any], event: Dict[str, Any], results: Dict[str, Any]) -> Optional[Dict[str, Any]]:

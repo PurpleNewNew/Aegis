@@ -76,7 +76,16 @@ def get_interaction_analysis_prompt(interaction_type: str, snapshot: Dict[str, A
                 if api_call.get('potential_issues'):
                     prompt_lines.append(f"    - **潜在问题**: {', '.join(api_call['potential_issues'])}")
         else:
-            prompt_lines.append("- **网络API调用分析**: 未捕获到API调用。 সন")
+            prompt_lines.append("- **网络API调用分析**: 未捕获到API调用。")
+
+        iast_findings = analysis_results.get('iast_findings', [])
+        if iast_findings:
+            prompt_lines.append("- **IAST运行时警报**: (捕获到高风险JS调用)")
+            for finding in iast_findings[:2]:
+                if finding.get('type') == 'cdp_event':
+                    prompt_lines.append(f"  - **[CDP]** 在`{finding.get('trigger')}`事件中，函数`{finding.get('function_name')}`被调用。捕获变量: {json.dumps(finding.get('variables', {}))}")
+                elif finding.get('type') == 'iast_event':
+                    prompt_lines.append(f"  - **[Hook]** 危险函数`{finding.get('sink')}`被调用，传入值: {finding.get('value')}")
 
     prompt_lines.extend([
         "",
@@ -104,7 +113,7 @@ def get_interaction_analysis_prompt(interaction_type: str, snapshot: Dict[str, A
 
     prompt_lines.extend([
         "",
-        "**重要提醒**: 你的回复必须仅仅是JSON对象，不包含任何其他文本。 সন",
+        "**重要提醒**: 你的回复必须仅仅是JSON对象，不包含任何其他文本。",
     ])
     
     return "\n".join(prompt_lines)
@@ -140,21 +149,21 @@ def get_agent_reasoning_prompt(goal: str, history: List[Dict[str, Any]], observa
         if sast_results and any(findings for findings in sast_results.values()):
             for tool_name, findings in sast_results.items():
                 if findings:
-                    prompt_lines.append(f"- **`{tool_name}`** 发现了 {len(findings)} 个线索。 সন")
+                    prompt_lines.append(f"- **`{tool_name}`** 发现了 {len(findings)} 个线索。")
         else:
-            prompt_lines.append("无任何发现。 সন")
+            prompt_lines.append("无任何发现。")
 
     if reasoning_level == 'high':
         prompt_lines.append("\n**交互式运行时(IAST)警报**:")
         if iast_findings:
-            prompt_lines.append("**警告**: 捕获到以下高风险运行时事件！请重点分析！ সন")
+            prompt_lines.append("**警告**: 捕获到以下高风险运行时事件！请重点分析！")
             for finding in iast_findings:
                 if finding.get('type') == 'cdp_event':
                     prompt_lines.append(f"- **[CDP调试器]** 在`{finding.get('trigger')}`事件中，函数`{finding.get('function_name')}`被调用。捕获到的变量: {json.dumps(finding.get('variables', {}))}")
                 elif finding.get('type') == 'iast_event':
                     prompt_lines.append(f"- **[JS Hook]** 危险函数`{finding.get('sink')}`被调用，传入的值: {finding.get('value')}")
         else:
-            prompt_lines.append("无任何运行时警报。 সন")
+            prompt_lines.append("无任何运行时警报。")
 
         prompt_lines.append("\n**网络流量分析(上一步操作触发)**:")
         if network_analysis and network_analysis.get('api_calls'):
@@ -164,20 +173,20 @@ def get_agent_reasoning_prompt(goal: str, history: List[Dict[str, Any]], observa
                 if api_call.get('potential_issues'):
                     prompt_lines.append(f"    - **潜在问题**: {', '.join(api_call['potential_issues'])}")
         else:
-            prompt_lines.append("- 未捕获到API调用。 সন")
+            prompt_lines.append("- 未捕获到API调用。")
 
     prompt_lines.append(f"\n**当前的动态观察结果**:\n```\n{observation}\n```")
     
     prompt_lines.extend([
         "",
         "**你的任务**:",
-        "1.  **思考**: 基于当前所有情报，用一句话总结下一步测试思路。 সন",
-        "2.  **决策**: 从工具清单中选择一个工具来执行。 সন",
+        "1.  **思考**: 基于当前所有情报，用一句话总结下一步测试思路。",
+        "2.  **决策**: 从工具清单中选择一个工具来执行。",
         "",
-        "**输出要求**: 你的回答**必须**是JSON对象，包含 `thought` 和 `tool_call` 两个键。 সন",
+        "**输出要求**: 你的回答**必须**是JSON对象，包含 `thought` 和 `tool_call` 两个键。",
         "**JSON输出示例**: ",
         '```json\n{ "thought": "点击注册按钮探索功能", "tool_call": { "name": "click_element", "args": { "selector": "[data-aegis-id=\"aegis-el-7\"]" } } }\n```',
-        "**关键指令**: 你的整个回复**必须**仅仅是JSON对象，不包含任何其他文本。 সন"
+        "**关键指令**: 你的整个回复**必须**仅仅是JSON对象，不包含任何其他文本。"
     ])
 
     return "\n".join(prompt_lines)

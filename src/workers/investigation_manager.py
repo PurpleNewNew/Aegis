@@ -1,14 +1,14 @@
 import asyncio
 import logging
 from asyncio import Queue
-from typing import Set, List, Dict, Any
+from typing import Set, List, Dict, Any, Optional
 from playwright.async_api import Browser
 
 from src.workers.agent_worker import AgentWorker
 from src.workers.interaction_worker import InteractionWorker
 from src.models.shared_state import SharedState
 from src.utils.browser_pool import BrowserPool
-from src.tools import browser_tools
+from src.tools import browser_tools, auth_tools
 
 class InvestigationManager:
     """
@@ -42,21 +42,16 @@ class InvestigationManager:
             debug_events_q=debug_q
         )
 
-    async def initialize(self, main_browser: Browser, playwright: Any):
-        """根据配置模式，初始化浏览器池。"""
+    async def initialize(self, main_browser: Browser, playwright: Any, initial_auth_state: Optional[Dict] = None):
+        """根据配置模式和初始认证状态，初始化浏览器池。"""
         pool_mode = self.config.get('browser_pool', {}).get('mode', 'standalone')
         self.logger.info(f"检测到浏览器池模式: '{pool_mode}'")
         
         if pool_mode == 'shared':
             await self.browser_pool.initialize_shared(main_browser, playwright)
         else:  # standalone
-            # 在独立模式下，我们不需要主浏览器实例，但可以预先获取认证状态
-            auth_state = None
-            if main_browser.contexts and main_browser.contexts[0].pages:
-                page = main_browser.contexts[0].pages[0]
-                # 此处可以调用一个简化的auth_state提取逻辑
-                auth_state = await page.context.storage_state()
-            await self.browser_pool.initialize_standalone(playwright, auth_state)
+            # 优先使用main.py在启动时扫描到的认证状态
+            await self.browser_pool.initialize_standalone(playwright, initial_auth_state, main_browser)
 
     async def close(self):
         """关闭所有代理任务和浏览器池。"""

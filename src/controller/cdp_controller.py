@@ -4,6 +4,7 @@ from asyncio import Queue
 from urllib.parse import urlparse
 from playwright.async_api import Page, Frame, Browser
 from typing import Dict, Any, Optional
+from src.tools import auth_tools
 
 class CDPController:
     """
@@ -35,21 +36,7 @@ class CDPController:
         except Exception:
             return False
 
-    async def _extract_full_auth_state(self, page: Page) -> Optional[Dict[str, Any]]:
-        try:
-            cookies = await page.context.cookies()
-            storage = await page.evaluate("""() => {
-                const ls = {}, ss = {};
-                try {
-                    for (let i=0; i<localStorage.length; i++) { ls[localStorage.key(i)] = localStorage.getItem(localStorage.key(i)); }
-                    for (let i=0; i<sessionStorage.length; i++) { ss[sessionStorage.key(i)] = sessionStorage.getItem(sessionStorage.key(i)); }
-                } catch (e) {}
-                return { localStorage: ls, sessionStorage: ss };
-            }""")
-            return {"cookies": cookies, **storage}
-        except Exception as e:
-            self.logger.error(f"提取完整认证状态时出错: {e}")
-            return None
+    
 
     async def handle_frame_navigated(self, frame: Frame):
         try:
@@ -67,7 +54,7 @@ class CDPController:
         try:
             self.logger.info(f"侦察到新的导航目标: {url}")
             self.reported_urls.add(url)
-            auth_state = await self._extract_full_auth_state(frame.page)
+            auth_state = await auth_tools.extract_full_auth_state(frame.page)
             await self.output_q.put({'event_type': 'navigation', 'url': url, 'auth_state': auth_state})
         except Exception as e:
             self.logger.warning(f"处理导航事件时出错（可能是浏览器已关闭）: {e}")
@@ -88,7 +75,7 @@ class CDPController:
                 
                 if not page.is_closed() and self._is_in_whitelist(page.url):
                     try:
-                        auth_state = await self._extract_full_auth_state(page)
+                        auth_state = await auth_tools.extract_full_auth_state(page)
                         event_data = {
                             'event_type': 'user_interaction',
                             'url': page.url,

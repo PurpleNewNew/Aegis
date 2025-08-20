@@ -1,9 +1,27 @@
-
 import logging
 from playwright.async_api import Page
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+async def extract_full_auth_state(page: Page) -> Optional[Dict[str, Any]]:
+    """
+    从给定页面提取完整的认证状态，包括Cookies, LocalStorage和SessionStorage。
+    """
+    try:
+        cookies = await page.context.cookies()
+        storage = await page.evaluate("""() => {
+            const ls = {}, ss = {};
+            try {
+                for (let i=0; i<localStorage.length; i++) { ls[localStorage.key(i)] = localStorage.getItem(localStorage.key(i)); }
+                for (let i=0; i<sessionStorage.length; i++) { ss[sessionStorage.key(i)] = sessionStorage.getItem(sessionStorage.key(i)); }
+            } catch (e) {}
+            return { localStorage: ls, sessionStorage: ss };
+        }""")
+        return {"cookies": cookies, **storage}
+    except Exception as e:
+        logger.error(f"提取完整认证状态时出错: {e}")
+        return None
 
 async def inject_auth_state(page: Page, auth_state: Dict[str, Any]):
     """
@@ -18,20 +36,10 @@ async def inject_auth_state(page: Page, auth_state: Dict[str, Any]):
             logger.info(f"成功向影子浏览器注入 {len(cookies)} 个Cookie。")
 
         # 2. 注入LocalStorage和SessionStorage
-        # 支持多种键名格式以提高兼容性
-        local_storage = (
-            auth_state.get('localStorage', {}) or 
-            auth_state.get('local_storage', {}) or
-            auth_state.get('localstorage', {})
-        )
-        session_storage = (
-            auth_state.get('sessionStorage', {}) or 
-            auth_state.get('session_storage', {}) or
-            auth_state.get('sessionstorage', {})
-        )
+        local_storage = auth_state.get('localStorage', {}) or auth_state.get('local_storage', {}) or auth_state.get('localstorage', {})
+        session_storage = auth_state.get('sessionStorage', {}) or auth_state.get('session_storage', {}) or auth_state.get('sessionstorage', {})
         
         if local_storage or session_storage:
-            # 检查页面URL，如果是about:blank或其他特殊页面，跳过localStorage/sessionStorage注入
             current_url = page.url
             if current_url in ['about:blank', 'about:page', 'chrome://newtab/', ''] or not current_url.startswith('http'):
                 logger.debug(f"跳过在特殊页面 '{current_url}' 上注入localStorage/sessionStorage")
