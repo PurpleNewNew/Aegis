@@ -1,9 +1,9 @@
-
 import asyncio
 import logging
 import yaml
 import os
-from playwright.async_api import async_playwright, Browser
+import time
+from playwright.async_api import async_playwright, Browser, Playwright
 
 # 禁用ChromaDB遥测功能以防止网络连接警告
 os.environ['ANONYMIZED_TELEMETRY'] = 'False'
@@ -17,8 +17,7 @@ from src.queues.queues import (
     debug_events_q,
     ai_output_q,
     reporter_q,
-    memory_q,
-    controller_status_q
+    memory_q
 )
 
 # 导入组件
@@ -29,11 +28,35 @@ from src.workers.broadcaster import Broadcaster
 from src.workers.reporter_worker import ReporterWorker
 from src.workers.memory_worker import MemoryWorker
 
+async def wait_for_browser(playwright: Playwright, config: dict) -> Browser:
+    """
+    等待并重复尝试连接到远程调试端口，直到成功。
+    """
+    port = config['browser']['remote_debugging_port']
+    retry_interval = config.get('browser', {}).get('connection_retry_interval', 5)
+    
+    while True:
+        try:
+            logging.info(f"正在尝试连接到端口 {port} 上的Chrome浏览器...")
+            browser = await playwright.chromium.connect_over_cdp(f"http://localhost:{port}")
+            logging.info("✅ 成功连接到Chrome浏览器！")
+            # 监听断开连接事件
+            browser.on("disconnected", lambda: logging.error("与主浏览器的连接已断开！请重启Aegis和浏览器。"))
+            return browser
+        except Exception as e:
+            # 简化错误信息，避免刷屏
+            if "ECONNREFUSED" in str(e):
+                logging.info(f"连接被拒绝。正在等待浏览器在端口 {port} 上启动... 将在 {retry_interval} 秒后重试。")
+            else:
+                logging.warning(f"连接浏览器时发生未知错误: {e}")
+            
+            await asyncio.sleep(retry_interval)
+
 async def main():
     """
-    初始化并运行Aegis应用的所有组件，采用集中式Playwright生命周期管理。
+    初始化并运行Aegis应用的所有组件，采用集中式Playwright和浏览器连接管理。
     """
-    logging.info("Aegis应用正在启动 (vFinal - 集中式Playwright管理)...")
+    logging.info("Aegis应用正在启动 (vFinal - 集中式连接管理)...")
 
     # 1. 加载配置
     try:
@@ -50,42 +73,37 @@ async def main():
     running_tasks = []
     manager = None
     playwright = None
+    browser = None
     try:
         # --------------------------------------------------------------------
-        # 步骤 1: 集中启动Playwright
+        # 步骤 1: 启动Playwright并等待浏览器连接
         # --------------------------------------------------------------------
         playwright = await async_playwright().start()
-        logging.info("Playwright引擎已启动。")
+        browser = await wait_for_browser(playwright, config)
 
         # --------------------------------------------------------------------
-        # 步骤 2: 协同初始化，传入共享的playwright实例
+        # 步骤 2: 初始化所有核心组件，并传入已连接的浏览器实例
         # --------------------------------------------------------------------
-        logging.info("正在启动侦察兵(CDPController)...")
-        scout = CDPController(output_q=navigation_q, config=config, status_q=controller_status_q, playwright=playwright)
-        running_tasks.append(asyncio.create_task(scout.run(), name="CDPScout"))
-
-        logging.info("等待侦察兵连接到主浏览器...")
-        main_browser: Browser = await controller_status_q.get()
-
-        if not main_browser or not main_browser.is_connected():
-            logging.error("侦察兵未能连接到主浏览器。请检查Chrome是否已以调试模式启动。")
-            return
-
-        logging.info("侦察兵已连接。正在初始化调查管理器和浏览器池...")
+        logging.info("浏览器已连接。正在初始化所有服务...")
+        
+        # 控制器现在直接接收browser对象
+        scout = CDPController(output_q=navigation_q, config=config)
+        debugger = CDPDebugger(output_q=debug_events_q, config=config)
+        
+        # 管理器也接收browser对象以初始化浏览器池
         manager = InvestigationManager(input_q=navigation_q, output_q=ai_output_q, debug_q=debug_events_q, config=config)
-        await manager.initialize(main_browser, playwright) # 传入playwright实例
-        logging.info("调查管理器和浏览器池初始化成功。")
-
-        # --------------------------------------------------------------------
-        # 步骤 3: 初始化并调度其余所有任务
-        # --------------------------------------------------------------------
-        debugger = CDPDebugger(output_q=debug_events_q, config=config, playwright=playwright) # 传入playwright实例
+        await manager.initialize(browser, playwright)
+        
         broadcaster = Broadcaster(input_q=ai_output_q, output_queues=[reporter_q, memory_q])
         reporter = ReporterWorker(input_q=reporter_q, config=config)
         memory = MemoryWorker(input_q=memory_q, config=config)
 
+        # --------------------------------------------------------------------
+        # 步骤 3: 启动所有任务
+        # --------------------------------------------------------------------
         running_tasks.extend([
-            asyncio.create_task(debugger.run(), name="CDPDebugger"),
+            asyncio.create_task(scout.run(browser), name="CDPScout"),
+            asyncio.create_task(debugger.run(browser), name="CDPDebugger"),
             asyncio.create_task(manager.run(), name="InvestigationManager"),
             asyncio.create_task(broadcaster.run(), name="Broadcaster"),
             asyncio.create_task(reporter.run(), name="ReporterWorker"),
@@ -103,38 +121,21 @@ async def main():
     finally:
         logging.info("正在优雅地关闭所有服务...")
 
-        # 步骤 1: 向所有任务发出取消信号
         for task in running_tasks:
             task.cancel()
-
-        # 步骤 2: 等待所有任务完成取消过程
-        logging.info(f"正在等待 {len(running_tasks)} 个任务响应取消信号...")
+        
         results = await asyncio.gather(*running_tasks, return_exceptions=True)
-        for i, result in enumerate(results):
-            task_name = running_tasks[i].get_name()
-            if isinstance(result, asyncio.CancelledError):
-                logging.info(f"任务 '{task_name}' 已成功取消。")
-            elif isinstance(result, Exception):
-                logging.warning(f"任务 '{task_name}' 在关闭时出现异常: {result}")
+        # (此处可以添加对关闭结果的日志记录)
         
-        logging.info("所有后台任务已停止。")
-
-        # 步骤 3: 在所有任务都停止后，安全地关闭资源
         if manager:
-            try:
-                logging.info("正在关闭调查管理器和浏览器池...")
-                await asyncio.wait_for(manager.close(), timeout=15.0)
-                logging.info("调查管理器已安全关闭。")
-            except asyncio.TimeoutError:
-                logging.warning("调查管理器关闭超时。")
-            except Exception as e:
-                logging.error(f"关闭调查管理器时发生严重错误: {e}", exc_info=True)
+            await manager.close()
         
-        # 步骤 4: 最后，关闭Playwright引擎
+        # 在所有任务和服务都关闭后，断开与浏览器的连接
+        if browser and browser.is_connected():
+            await browser.close()
+            
         if playwright:
-            logging.info("正在关闭Playwright引擎...")
             await playwright.stop()
-            logging.info("Playwright引擎已关闭。")
 
         logging.info("Aegis已完全关闭。")
 

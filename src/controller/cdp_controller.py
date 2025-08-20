@@ -7,15 +7,13 @@ from typing import Dict, Any, Optional
 
 class CDPController:
     """
-    作为"侦察兵"，连接到用户的主浏览器，监控页面导航事件，
+    作为"侦察兵"，使用一个已连接的浏览器实例，监控页面导航和交互事件，
     并将目标URL和完整的认证状态发送给InvestigationManager。
     """
 
-    def __init__(self, output_q: Queue, config: dict, status_q: Queue, playwright: Any):
+    def __init__(self, output_q: Queue, config: dict):
         self.output_q = output_q
-        self.status_q = status_q
-        self.playwright = playwright
-        self.port = config['browser']['remote_debugging_port']
+        self.config = config
         self.whitelist_domains = config.get('scanner_scope', {}).get('whitelist_domains', [])
         self.logger = logging.getLogger(self.__class__.__name__)
         self.reported_urls = set()
@@ -75,7 +73,6 @@ class CDPController:
             self.logger.warning(f"处理导航事件时出错（可能是浏览器已关闭）: {e}")
 
     async def setup_page_listeners(self, page: Page):
-        # --- 白名单前置检查 ---
         if not self._is_in_whitelist(page.url):
             self.logger.debug(f"页面 {page.url} 不在白名单内，跳过监听器设置。")
             return
@@ -160,26 +157,34 @@ class CDPController:
         except Exception as e:
             self.logger.error(f"为页面 {page.url} 设置监听器失败: {e}")
 
-    async def run(self):
-        self.logger.info(f"侦察兵控制器正在尝试连接到端口 {self.port} 上的Chrome浏览器...")
-        browser = None
+    async def run(self, browser: Browser):
+        self.logger.info("侦察兵控制器(CDPController)正在启动并接管浏览器...")
         try:
-            browser = await self.playwright.chromium.connect_over_cdp(f"http://localhost:{self.port}")
-            self.logger.info("侦察兵成功连接到Chrome。")
-            await self.status_q.put(browser)
+            if not browser.is_connected():
+                self.logger.error("传入的浏览器实例未连接！")
+                return
+
+            # 假设浏览器至少有一个上下文
+            if not browser.contexts:
+                logging.warning("浏览器没有活动的上下文。可能无法捕获任何事件。")
+                # 可以在这里等待，或者依赖于 "page" 事件
 
             context = browser.contexts[0]
+            
             # 为已存在的页面设置监听器
             for page in context.pages:
                 await self.setup_page_listeners(page)
+            
             # 为未来新打开的页面设置监听器
             context.on("page", self.setup_page_listeners)
 
-            while browser.is_connected():
-                await asyncio.sleep(1)
+            self.logger.info("侦察兵已在所有现有和未来页面上设置监听器。")
+            # 保持运行以持续监听
+            await asyncio.Event().wait()
+
+        except asyncio.CancelledError:
+            self.logger.info("侦察兵控制器任务被取消。")
         except Exception as e:
             self.logger.error(f"侦察兵控制器发生意外错误: {e}", exc_info=True)
-            if not self.status_q.full():
-                self.status_q.put_nowait(None)
         finally:
             self.logger.info("侦察兵控制器已关闭。")

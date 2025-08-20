@@ -1,11 +1,10 @@
 import asyncio
 import logging
-import json
 import time
 from asyncio import Queue
 from typing import Any
 from urllib.parse import urlparse
-from playwright.async_api import async_playwright, Page, CDPSession
+from playwright.async_api import Page, CDPSession, Browser
 
 class CDPDebugger:
     """
@@ -13,11 +12,9 @@ class CDPDebugger:
     快速提取关键信息供AI分析。
     """
 
-    def __init__(self, output_q: Queue, config: dict, playwright: Any):
+    def __init__(self, output_q: Queue, config: dict):
         self.output_q = output_q
         self.config = config
-        self.playwright = playwright
-        self.port = self.config['browser']['remote_debugging_port']
         self.whitelist_domains = config.get('scanner_scope', {}).get('whitelist_domains', [])
         self.logger = logging.getLogger(self.__class__.__name__)
         self.cdp_sessions = {}
@@ -40,7 +37,6 @@ class CDPDebugger:
 
     async def _on_paused(self, event: dict, session: CDPSession, page_url: str):
         try:
-            # 再次检查URL，确保事件来源合法
             if not self._is_in_whitelist(page_url):
                 return
 
@@ -63,18 +59,25 @@ class CDPDebugger:
                             variables[prop['name']] = str(prop.get('value').get('value', ''))[:100]
 
             trigger = event.get('data', {}).get('eventName', 'debugger')
-            self.logger.info(f"CDP断点触发: {trigger} on {page_url}")
-            # 此处可以将捕获到的调试信息放入队列，供特定分析任务消费
-            # await self.output_q.put({...})
+            self.logger.info(f"CDP断点触发: {trigger} on {page_url}, 函数: {function_name}")
+            
+            debug_info = {
+                'type': 'cdp_event',
+                'trigger': trigger,
+                'function_name': function_name,
+                'variables': variables,
+                'url': page_url,
+                'timestamp': time.time()
+            }
+            await self.output_q.put(debug_info)
 
         except Exception as e:
             self.logger.error(f"处理暂停事件时出错: {e}")
         finally:
-            # 恢复调试器执行
             try:
                 await session.send('Debugger.resume')
             except Exception:
-                pass  # 如果session已经关闭，忽略错误
+                pass
 
     async def setup_debugger_for_page(self, page: Page):
         if not self._is_in_whitelist(page.url):
@@ -86,7 +89,7 @@ class CDPDebugger:
             session = await page.context.new_cdp_session(page)
             self.cdp_sessions[page] = session
             
-            page_url = page.url # 捕获当前URL以供回调使用
+            page_url = page.url
             session.on('Debugger.paused', lambda event: asyncio.create_task(self._on_paused(event, session, page_url)))
             await session.send('Debugger.enable')
             
@@ -101,12 +104,16 @@ class CDPDebugger:
         except Exception as e:
             self.logger.error(f"为页面 {page.url} 设置调试器失败: {e}")
 
-    async def run(self):
-        self.logger.info(f"CDP调试器正在尝试连接到端口 {self.port} 上的Chrome浏览器...")
+    async def run(self, browser: Browser):
+        self.logger.info("CDP调试器正在启动并接管浏览器...")
         try:
-            browser = await self.playwright.chromium.connect_over_cdp(f"http://localhost:{self.port}")
-            self.logger.info("CDP调试器成功连接到Chrome。")
-            
+            if not browser.is_connected():
+                self.logger.error("传入的浏览器实例未连接！")
+                return
+
+            if not browser.contexts:
+                logging.warning("浏览器没有活动的上下文。可能无法设置调试器。")
+
             context = browser.contexts[0]
 
             async def setup_for_page(page):

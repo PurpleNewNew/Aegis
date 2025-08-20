@@ -122,7 +122,7 @@ class InvestigationManager:
             interaction_event['auth_state'] = auth_state
             
             # 直接调用交互分析器的analyze_interaction，由其内部管理任务
-            asyncio.create_task(self.interaction_worker.analyze_interaction(interaction_event))
+            asyncio.create_task(self.interaction_worker.handle_interaction_event(interaction_event))
             
         except Exception as e:
             self.logger.error(f"处理用户交互事件时出错: {e}", exc_info=True)

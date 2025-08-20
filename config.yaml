@@ -35,6 +35,14 @@ scanner_scope:
   whitelist_domains: ["ctf.show","121.43.58.124"]
 
 llm_service:
+  # =================================================================
+  # AI推理设置
+  # =================================================================
+  
+  # 推理等级: 'high' (信息最全，最智能), 'medium' (平衡), 或 'low' (信息精简，速度最快)
+  # 对于gpt-oss等推理较慢的模型，推荐使用 'medium' 或 'low'
+  reasoning_level: 'medium'
+
   # 使用与OpenAI兼容的本地/远程API服务（如 LM Studio 或 Ollama 的 OpenAI 兼容模式）。
   api_config:
     base_url: "http://localhost:1234/v1"
