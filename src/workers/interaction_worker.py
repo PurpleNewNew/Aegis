@@ -12,7 +12,7 @@ from src.prompts.prompt import get_js_re_prompt
 from src.utils.ai_logger import log_ai_dialogue
 from src.utils.crypto_analyzer import CryptoAnalyzer
 from src.tools.network_tools import NetworkSniffer
-from src.models.data_correlation import DataCorrelationManager
+from src.data.data_correlation import DataCorrelationManager
 
 class InteractionWorker:
     """

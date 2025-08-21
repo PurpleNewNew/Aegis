@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 # 导入核心组件
 from src.controller.cdp_debugger import CDPDebugger
 from src.workers.interaction_worker import InteractionWorker
-from src.data_hub import get_data_hub, DataHub
+from src.data.data_hub import get_data_hub, DataHub
 
 async def main():
     """

@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, List
 from urllib.parse import urlparse
 from playwright.async_api import Page, CDPSession, Browser, Request, Response
 from src.queues.queue_manager import QueueType
-from src.models.data_correlation import DataCorrelationManager
+from src.data.data_correlation import DataCorrelationManager
 
 # 常量定义
 DEFAULT_MAX_NETWORK_DATA_PER_PAGE = 500  # 默认每页最大网络数据条目
