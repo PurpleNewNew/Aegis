@@ -242,38 +242,38 @@ class NetworkSniffer:
         if not self.is_capturing:
             return
 
-    request_data = {
-        "type": "request",
-        "timestamp": datetime.now().isoformat(),
-        "data": {
-            "url": request.url,
-            "method": request.method,
-            "headers": dict(request.headers),
-            "post_data": request.post_data,
-            "resource_type": request.resource_type,
-            "request_id": id(request)
+        request_data = {
+            "type": "request",
+            "timestamp": datetime.now().isoformat(),
+            "data": {
+                "url": request.url,
+                "method": request.method,
+                "headers": dict(request.headers),
+                "post_data": request.post_data,
+                "resource_type": request.resource_type,
+                "request_id": id(request)
+            }
         }
-    }
     
-    # 计算请求优先级
-    priority = self.filter.get_request_priority(request)
-    request_data["data"]["priority"] = priority
+        # 计算请求优先级
+        priority = self.filter.get_request_priority(request)
+        request_data["data"]["priority"] = priority
     
-    # 判断是否为噪音请求
-    is_noise = self.filter.is_noise_request(request)
-    request_data["data"]["is_noise"] = is_noise
+        # 判断是否为噪音请求
+        is_noise = self.filter.is_noise_request(request)
+        request_data["data"]["is_noise"] = is_noise
     
-    # 判断是否为重要请求
-    is_important = self.filter.is_important_request(request)
-    request_data["data"]["is_important"] = is_important
+        # 判断是否为重要请求
+        is_important = self.filter.is_important_request(request)
+        request_data["data"]["is_important"] = is_important
     
-    # 如果启用智能过滤且是噪音请求，则跳过存储
-    should_store = not (self.enable_smart_filtering and is_noise)
+        # 如果启用智能过滤且是噪音请求，则跳过存储
+        should_store = not (self.enable_smart_filtering and is_noise)
     
-    if should_store:
-        self.captured_requests.append(request_data)
+        if should_store:
+            self.captured_requests.append(request_data)
     
-    logger.debug(f"捕获到请求: {request.method} {request.url}")
+        logger.debug(f"捕获到请求: {request.method} {request.url}")
 
     async def _on_response(self, response: Response):
         """处理捕获的响应"""

@@ -2,9 +2,17 @@ import json
 import re
 from typing import List, Dict, Any
 
-def get_js_re_prompt(code_snippet: str, variables: Dict[str, Any], url: str, network_data: List[Dict] = None) -> str:
+def get_js_re_prompt(code_snippet: str, variables: Dict[str, Any], url: str, network_data: List[Dict] = None, js_hook_events: List[Dict] = None, analysis_context: Dict = None) -> str:
     """
     构建一个专门用于JS逆向工程分析的提示词。
+    
+    Args:
+        code_snippet: JavaScript代码片段
+        variables: 变量字典
+        url: 目标URL
+        network_data: 网络数据列表
+        js_hook_events: JS钩子事件列表
+        analysis_context: 分析上下文
     """
 
     variable_list = []
@@ -14,19 +22,17 @@ def get_js_re_prompt(code_snippet: str, variables: Dict[str, Any], url: str, net
 
     network_info = ""
     if network_data:
-        # 分析网络数据，提取关键请求
+        # 按时间戳排序请求
+        sorted_requests = sorted(network_data, key=lambda x: x.get('timestamp', 0))
+        
+        # 识别可能的密钥请求
         key_requests = []
-        for req in network_data:
+        for req in sorted_requests:
             if req.get('type') == 'request':
                 req_url = req.get('url', '')
                 # 检查是否可能是获取密钥的请求
                 if 'key' in req_url.lower() or 'token' in req_url.lower() or 'api' in req_url.lower():
-                    key_requests.append({
-                        'url': req_url,
-                        'method': req.get('method', ''),
-                        'headers': req.get('headers', {}),
-                        'post_data': req.get('post_data')
-                    })
+                    key_requests.append(req)
         
         if key_requests:
             network_info = "\n**相关的网络请求**\n"
@@ -35,7 +41,108 @@ def get_js_re_prompt(code_snippet: str, variables: Dict[str, Any], url: str, net
                 network_info += f"- URL: {req['url']}\n"
                 network_info += f"- 方法: {req['method']}\n"
                 if req.get('post_data'):
-                    network_info += f"- POST数据: {req['post_data']}\n"
+                    post_data_preview = str(req['post_data'])[:200] + ('...' if len(str(req['post_data'])) > 200 else '')
+                    network_info += f"- POST数据: {post_data_preview}\n"
+                
+                # 检查是否有对应的响应
+                if req.get('response'):
+                    network_info += f"- 响应状态: {req['response']['status']}\n"
+                    if req['response']['body']:
+                        # 限制响应体显示长度
+                        body_preview = req['response']['body'][:200] + ('...' if len(req['response']['body']) > 200 else '')
+                        network_info += f"- 响应体预览: {body_preview}\n"
+        
+        # 分析请求之间的关系
+        if len(sorted_requests) > 1:
+            network_info += "\n**请求关系分析**\n"
+            # 查找可能的密钥请求和后续使用密钥的请求
+            key_request_indices = []
+            for i, req in enumerate(sorted_requests):
+                if req.get('type') == 'request' and ('key' in req.get('url', '').lower() or 'token' in req.get('url', '').lower()):
+                    key_request_indices.append(i)
+            
+            if key_request_indices:
+                for i in key_request_indices:
+                    if i + 1 < len(sorted_requests):
+                        network_info += f"- 请求 {i+1} (可能包含密钥) 之后紧跟着请求 {i+2}\n"
+            
+            # 检查是否有请求在获取密钥后立即发送加密数据
+            for i in key_request_indices:
+                if i + 1 < len(sorted_requests):
+                    next_req = sorted_requests[i+1]
+                    if next_req.get('type') == 'request' and ('encrypt' in next_req.get('url', '').lower() or 'data' in next_req.get('url', '').lower()):
+                        network_info += f"- 请求 {i+2} 可能使用了请求 {i+1} 获取的密钥进行加密操作\n"
+    
+    # 添加JS钩子事件信息
+    js_hook_info = ""
+    if js_hook_events:
+        js_hook_info = "\n**JS钩子事件**\n"
+        
+        # 按时间戳排序事件
+        sorted_events = sorted(js_hook_events, key=lambda x: x.get('timestamp', 0))
+        
+        # 识别加密相关事件
+        crypto_events = []
+        for event in sorted_events[:10]:  # 只显示前10个事件
+            event_type = event.get('type', '')
+            function_name = event.get('functionName', '')
+            
+            # 检查是否是加密相关事件
+            if any(keyword in function_name.lower() for keyword in ['encrypt', 'decrypt', 'hash', 'sign', 'aes', 'rsa', 'md5', 'sha']):
+                crypto_events.append(event)
+            elif event_type in ['function_call', 'function_return'] and any(keyword in function_name.lower() for keyword in ['crypto', 'key', 'token']):
+                crypto_events.append(event)
+        
+        if crypto_events:
+            js_hook_info += "\n**加密相关函数调用**:\n"
+            for i, event in enumerate(crypto_events[:5]):  # 只显示前5个加密相关事件
+                js_hook_info += f"\n**事件 {i+1}**:\n"
+                js_hook_info += f"- 函数名: {event.get('functionName', 'unknown')}\n"
+                js_hook_info += f"- 事件类型: {event.get('type', 'unknown')}\n"
+                if event.get('args'):
+                    args_preview = str(event['args'])[:150] + ('...' if len(str(event['args'])) > 150 else '')
+                    js_hook_info += f"- 参数: {args_preview}\n"
+                if event.get('returnValue'):
+                    return_preview = str(event['returnValue'])[:150] + ('...' if len(str(event['returnValue'])) > 150 else '')
+                    js_hook_info += f"- 返回值: {return_preview}\n"
+        
+        # 分析事件序列
+        if len(sorted_events) > 1:
+            js_hook_info += "\n**事件序列分析**:\n"
+            # 查找可能的密钥获取和加密序列
+            for i, event in enumerate(sorted_events):
+                if i + 1 < len(sorted_events):
+                    current_func = event.get('functionName', '').lower()
+                    next_func = sorted_events[i+1].get('functionName', '').lower()
+                    
+                    # 检查是否是密钥获取后立即加密的模式
+                    if ('key' in current_func or 'token' in current_func) and ('encrypt' in next_func or 'sign' in next_func):
+                        js_hook_info += f"- {event.get('functionName')} -> {sorted_events[i+1].get('functionName')} (可能的密钥获取+加密序列)\n"
+    
+    # 添加分析上下文信息
+    context_info = ""
+    if analysis_context:
+        context_info = "\n**分析上下文**\n"
+        
+        # 添加会话信息
+        if analysis_context.get('session_info'):
+            session_info = analysis_context['session_info']
+            context_info += f"\n- 会话ID: {session_info.get('session_id', 'unknown')}\n"
+            context_info += f"- 会话持续时间: {session_info.get('duration', 'unknown')}\n"
+        
+        # 添加数据统计
+        if analysis_context.get('data_stats'):
+            stats = analysis_context['data_stats']
+            context_info += "\n- 数据统计:\n"
+            for data_type, count in stats.items():
+                context_info += f"  - {data_type}: {count} 条\n"
+        
+        # 添加时间线摘要
+        if analysis_context.get('timeline_summary'):
+            timeline = analysis_context['timeline_summary']
+            context_info += "\n- 时间线摘要:\n"
+            for event in timeline[:3]:  # 只显示前3个事件
+                context_info += f"  - {event.get('type', 'unknown')} @ {event.get('timestamp', 'unknown')}\n"
 
     prompt_lines = [
         "你是一名顶级的JavaScript逆向工程专家，尤其擅长分析和破解前端加密逻辑。",
@@ -53,6 +160,8 @@ def get_js_re_prompt(code_snippet: str, variables: Dict[str, Any], url: str, net
         "**捕获到的相关变量**",
         variables_str,
         network_info,
+        js_hook_info,
+        context_info,
         "",
         "**你的任务**",
         "1. **识别加密/签名算法**：分析代码，判断它使用了哪种或哪几种算法（例如：AES, DES, RSA, MD5, SHA, HMAC, SM2, SM4等）。",

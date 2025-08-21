@@ -2,8 +2,10 @@ import asyncio
 import logging
 import yaml
 import os
-from playwright.async_api import async_playwright, Browser
-from asyncio import Queue
+from playwright.async_api import async_playwright
+
+# 导入队列管理器
+from src.queues.queue_manager import QueueManager, QueueType
 
 # 禁用ChromaDB遥测功能
 os.environ['ANONYMIZED_TELEMETRY'] = 'False'
@@ -14,6 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 # 导入核心组件
 from src.controller.cdp_debugger import CDPDebugger
 from src.workers.interaction_worker import InteractionWorker
+from src.data_hub import get_data_hub, DataHub
 
 async def main():
     """
@@ -33,8 +36,20 @@ async def main():
 
     os.makedirs(os.path.dirname(config.get('logging', {}).get('ai_dialogues_file', './logs/ai_dialogues.jsonl')), exist_ok=True)
 
-    # 创建连接CDPDebugger和InteractionWorker的队列
-    debug_q = Queue()
+    # 初始化队列管理器
+    queue_manager = QueueManager(config)
+    debug_q = queue_manager.get_queue(QueueType.DEBUG_EVENTS)
+    network_data_q = queue_manager.get_queue(QueueType.NETWORK_DATA)
+    js_hook_events_q = queue_manager.get_queue(QueueType.JS_HOOK_EVENTS)
+
+    # 初始化数据枢纽
+    data_hub = get_data_hub()
+
+    # 启动队列处理任务
+    queue_tasks = []
+    queue_tasks.append(asyncio.create_task(data_hub.process_queue(debug_q, 'cdp_events')))
+    queue_tasks.append(asyncio.create_task(data_hub.process_queue(network_data_q, 'network_data')))
+    queue_tasks.append(asyncio.create_task(data_hub.process_queue(js_hook_events_q, 'js_hook_events')))
 
     running_tasks = []
     playwright = None
@@ -56,8 +71,8 @@ async def main():
                 await asyncio.sleep(5)
 
         # 步骤 2: 初始化核心组件
-        debugger = CDPDebugger(output_q=debug_q, config=config)
-        analyzer = InteractionWorker(config=config, debug_q=debug_q)
+        analyzer = InteractionWorker(config=config, debug_q=debug_q, js_hook_events_q=js_hook_events_q)
+        debugger = CDPDebugger(output_q=debug_q, network_data_q=network_data_q, config=config, interaction_worker=analyzer)
 
         running_tasks.extend([
             asyncio.create_task(debugger.run(browser), name="CDPDebugger"),
@@ -66,18 +81,18 @@ async def main():
 
         # 步骤 3: 运行
         logging.info(f"Aegis所有 {len(running_tasks)} 个核心模块已启动。请在主浏览器中操作，触发加密事件...")
-        await asyncio.gather(*running_tasks)
+        await asyncio.gather(*running_tasks, *queue_tasks)
 
     except asyncio.CancelledError:
         logging.info("应用主任务收到关闭信号...")
     finally:
         logging.info("正在优雅地关闭所有服务...")
 
-        for task in running_tasks:
+        for task in running_tasks + queue_tasks:
             if not task.done():
                 task.cancel()
         
-        results = await asyncio.gather(*running_tasks, return_exceptions=True)
+        results = await asyncio.gather(*(running_tasks + queue_tasks), return_exceptions=True)
         for i, result in enumerate(results):
             task_name = running_tasks[i].get_name()
             if isinstance(result, asyncio.CancelledError):
@@ -87,6 +102,8 @@ async def main():
         
         logging.info("所有后台任务已停止。")
 
+        await data_hub.shutdown()
+        
         if browser and browser.is_connected():
             await browser.close()
             logging.info("主浏览器连接已关闭。")

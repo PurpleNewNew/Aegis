@@ -10,10 +10,6 @@ from asyncio import Queue, Semaphore, Task
 from src.tools.network_tools import NetworkSniffer
 
 class AgentWorker:
-    """
-    Aegis的最终版"AI指挥官"代理，实现了"真登录"和"高效侦察"逻辑。
-    """
-
     def __init__(self, goal: str, start_url: str, auth_state: Dict, config: dict, browser_pool: Any, concurrency_semaphore: Semaphore, output_q: Queue, debug_events_q: Queue, on_complete: Callable[[str], None], shared_state: Any = None):
         self.goal = goal
         self.start_url = start_url
