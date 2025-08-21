@@ -59,7 +59,6 @@ class InteractionWorker:
         await self._load_js_hooks()
         self._debug_listener_task = asyncio.create_task(self._listen_for_debug_events())
         self.logger.info("InteractionWorker 开始运行，等待事件...")
-        # The main loop is now in InvestigationManager, which calls the appropriate handler.
 
     async def _listen_for_debug_events(self):
         self.logger.info("IAST/CDP事件监听器已启动。")
@@ -84,12 +83,11 @@ class InteractionWorker:
         asyncio.create_task(self._perform_analysis_workflow(event_chain))
 
     async def analyze_url(self, nav_info: Dict[str, Any]):
-        """对导航事件中的URL参数进行轻量级DAST测试。"""
         if not self.auto_security_testing:
             return
         
         url = nav_info.get('url')
-        self.logger.info(f"开始对URL参数进行DAST测试: {url}")
+        self.logger.info(f"接收到新的[URL]分析任务: {url}")
         asyncio.create_task(self._test_url_params(url, nav_info.get('auth_state')))
 
     async def _load_js_hooks(self):
@@ -119,21 +117,31 @@ class InteractionWorker:
                 initial_event = event_chain[0]
                 if initial_event.get('auth_state'):
                     await auth_tools.inject_auth_state(page, initial_event['auth_state'])
+                
                 await browser_tools.navigate(page, initial_event['url'])
 
-                prerequisite_chain = event_chain[:-1]
-                for event in prerequisite_chain:
-                    self.logger.info(f"重放前置操作: {event.get('interaction_type')} on {event.get('element_info', {}).get('selector')}")
+                sniffer = NetworkSniffer()
+                await sniffer.start_capture(page)
+
+                for event in event_chain:
+                    self.logger.info(f"重放操作: {event.get('interaction_type')} on {event.get('element_info', {}).get('selector')}")
                     try:
                         await self._replay_single_interaction(page, event)
                     except Exception as e:
-                        self.logger.warning(f"重放前置操作失败，可能会影响分析准确性: {e}")
+                        self.logger.warning(f"重放操作失败: {e}")
                 
+                await sniffer.stop_capture(page)
+                network_analysis = sniffer.analyze_api_calls()
+
                 final_event = event_chain[-1]
-                self.logger.info(f"开始对最终操作进行深度分析: {final_event.get('interaction_type')}")
                 snapshot = await self._create_interaction_snapshot(page, final_event)
-                analysis_results = await self._run_full_analysis(page, snapshot, final_event)
                 
+                analysis_results = await self._run_full_analysis(page, snapshot, final_event)
+                analysis_results['network_packet_analysis'] = network_analysis
+
+                if self.enable_llm_analysis:
+                    analysis_results['llm_analysis'] = await self._perform_llm_analysis(snapshot, final_event, analysis_results)
+
                 if self.generate_interaction_reports:
                     await self._accumulate_and_report(final_event, snapshot, analysis_results)
 
@@ -151,7 +159,7 @@ class InteractionWorker:
             return
 
         if interaction_type == 'click' or interaction_type == 'submit':
-            await page.click(selector, timeout=15000, force=True)
+            await page.click(selector, timeout=15000)
         elif interaction_type == 'input':
             await page.fill(selector, element_info.get('text', 'aegis_replay'), timeout=15000)
         
@@ -264,30 +272,15 @@ class InteractionWorker:
         analysis_results = {'sast_findings': snapshot['sast_results']}
         if self.analysis_depth == 'deep':
             self.iast_findings.clear()
-            await asyncio.sleep(0.5)
-
             results = await asyncio.gather(
                 self._analyze_js_and_crypto(page, snapshot, event),
-                self._analyze_network_packets(page, snapshot, event),
                 self._run_shadow_browser_test(page, snapshot, event),
                 return_exceptions=True
             )
             analysis_results['js_crypto_analysis'] = results[0] if not isinstance(results[0], Exception) else None
-            analysis_results['network_packet_analysis'] = results[1] if not isinstance(results[1], Exception) else None
-            analysis_results['shadow_browser_test_results'] = results[2] if not isinstance(results[2], Exception) else None
-            
+            analysis_results['shadow_browser_test_results'] = results[1] if not isinstance(results[1], Exception) else None
             analysis_results['iast_findings'] = self.iast_findings.copy()
             self.iast_findings.clear()
-
-        self.logger.info("准备进行LLM分析前的最终检查...")
-        self.logger.info(f"  - 是否启用LLM分析 (self.enable_llm_analysis): {self.enable_llm_analysis}")
-        
-        if self.enable_llm_analysis:
-            self.logger.info("LLM分析条件满足，正在调用...")
-            analysis_results['llm_analysis'] = await self._perform_llm_analysis(snapshot, event, analysis_results)
-        else:
-            self.logger.warning("LLM分析未启用或条件不满足，跳过。")
-
         return analysis_results
 
     async def _analyze_js_and_crypto(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -300,34 +293,27 @@ class InteractionWorker:
             self.logger.error(f"JS加密分析失败: {e}")
             return None
 
-    async def _analyze_network_packets(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        sniffer = NetworkSniffer()
-        try:
-            await sniffer.start_capture(page)
-            target_selector = snapshot.get('target_element', {}).get('selector')
-            if target_selector:
-                try:
-                    interaction_type = event.get('interaction_type')
-                    if interaction_type in ['click', 'submit']:
-                        await page.click(target_selector, timeout=15000, no_wait_after=True, force=True)
-                    elif interaction_type == 'input':
-                        await page.fill(target_selector, 'aegis_test_input', timeout=15000)
-                        await page.press(target_selector, 'Enter')
-                    await asyncio.sleep(2)
-                except Exception as e:
-                    self.logger.warning(f"模拟交互以捕获网络包失败: {e}")
-            await sniffer.stop_capture(page)
-            return sniffer.analyze_api_calls()
-        except Exception as e:
-            self.logger.error(f"网络数据包分析失败: {e}", exc_info=True)
-            return None
-
     async def _run_shadow_browser_test(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         findings = []
+        # This is a placeholder for the full DAST engine
+        # For now, we just run a simple SSTI check on input events
         target_selector = snapshot.get('target_element', {}).get('selector')
         if event.get('interaction_type') == 'input' and target_selector:
-            # ... (SSTI and other DAST logic will go here)
-            pass
+            try:
+                ssti_payload = "{{7*7}}"
+                await page.fill(target_selector, ssti_payload, timeout=15000)
+                await page.press(target_selector, 'Enter')
+                await asyncio.sleep(1)
+                content = await page.content()
+                if "49" in content and ssti_payload not in content:
+                    findings.append({
+                        'type': 'SSTI',
+                        'severity': 'High',
+                        'description': 'Input field seems vulnerable to SSTI.',
+                        'payload': ssti_payload
+                    })
+            except Exception as e:
+                self.logger.warning(f"SSTI影人浏览器测试失败: {e}")
         return {'security_findings': findings}
 
     async def _test_url_params(self, url: str, auth_state: Optional[Dict]):
