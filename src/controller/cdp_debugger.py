@@ -2,10 +2,11 @@ import asyncio
 import logging
 import json
 import time
+import base64
 from asyncio import Queue
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 from urllib.parse import urlparse
-from playwright.async_api import Page, CDPSession, Browser
+from playwright.async_api import Page, CDPSession, Browser, Request, Response
 
 class CDPDebugger:
     """
@@ -20,6 +21,8 @@ class CDPDebugger:
         self.whitelist_domains = config.get('scanner_scope', {}).get('whitelist_domains', [])
         self.logger = logging.getLogger(self.__class__.__name__)
         self.cdp_sessions: Dict[Page, CDPSession] = {}
+        # 存储网络请求数据
+        self.network_data: Dict[str, List[Dict]] = {}
 
     def _is_in_whitelist(self, url: str) -> bool:
         if not url or not url.startswith(('http://', 'https://')):
@@ -36,6 +39,51 @@ class CDPDebugger:
             return False
         except Exception:
             return False
+
+    async def _on_request(self, request: Request, page_url: str):
+        """处理网络请求事件"""
+        try:
+            if not self._is_in_whitelist(page_url):
+                return
+
+            # 初始化页面的网络数据存储
+            if page_url not in self.network_data:
+                self.network_data[page_url] = []
+                
+            request_data = {
+                'type': 'request',
+                'timestamp': time.time(),
+                'url': request.url,
+                'method': request.method,
+                'headers': dict(request.headers),
+                'post_data': request.post_data,
+                'resource_type': request.resource_type
+            }
+            
+            self.network_data[page_url].append(request_data)
+            self.logger.debug(f"捕获到网络请求: {request.method} {request.url}")
+            
+        except Exception as e:
+            self.logger.error(f"处理网络请求事件时出错: {e}", exc_info=True)
+
+    async def _on_response(self, response: Response, page_url: str):
+        """处理网络响应事件"""
+        try:
+            if not self._is_in_whitelist(page_url):
+                return
+
+            # 查找对应的请求并添加响应信息
+            if page_url in self.network_data:
+                for req in self.network_data[page_url]:
+                    if req['type'] == 'request' and req['url'] == response.url:
+                        req['response'] = {
+                            'status': response.status,
+                            'headers': dict(response.headers)
+                        }
+                        break
+                        
+        except Exception as e:
+            self.logger.error(f"处理网络响应事件时出错: {e}", exc_info=True)
 
     async def _on_paused(self, event: Dict[str, Any], session: CDPSession, page_url: str):
         """(简化版) 处理断点暂停，直接分析第一个捕获到的帧。"""
@@ -89,7 +137,9 @@ class CDPDebugger:
                 'function_name': function_name,
                 'code_snippet': code_snippet,
                 'variables': variables,
-                'call_stack': [frame.get('functionName', 'anonymous') for frame in call_frames[:5]]
+                'call_stack': [frame.get('functionName', 'anonymous') for frame in call_frames[:5]],
+                # 添加网络数据
+                'network_data': self.network_data.get(page_url, [])
             }
             
             self.logger.info(f"CDP断点触发: {debug_event['trigger']} on {debug_event['function_name']}")
@@ -113,6 +163,17 @@ class CDPDebugger:
             self.cdp_sessions[page] = session
             
             page_url = page.url
+            
+            # 设置网络监听器
+            async def on_request(request):
+                await self._on_request(request, page_url)
+                
+            async def on_response(response):
+                await self._on_response(response, page_url)
+                
+            page.on("request", on_request)
+            page.on("response", on_response)
+            
             session.on('Debugger.paused', lambda event: asyncio.create_task(self._on_paused(event, session, page_url)))
             await session.send('Debugger.enable')
             
