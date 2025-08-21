@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional, List
 from asyncio import Task
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from openai import AsyncOpenAI
-from playwright.async_api import Page, BrowserContext
+from playwright.async_api import Page, BrowserContext, Error as PlaywrightError
 
 from src.utils.browser_pool import BrowserPool
 from src.tools import browser_tools, auth_tools
@@ -59,24 +59,7 @@ class InteractionWorker:
         await self._load_js_hooks()
         self._debug_listener_task = asyncio.create_task(self._listen_for_debug_events())
         self.logger.info("InteractionWorker 开始运行，等待事件...")
-        try:
-            while True:
-                event = await self.input_q.get()
-                if event is None: break
-                
-                event_type = event.get('event_type', 'unknown')
-                if event_type == 'user_interaction':
-                    await self.handle_interaction_event(event)
-                elif event_type == 'navigation':
-                    await self.analyze_url(event) # 新增：处理URL分析事件
-
-                self.input_q.task_done()
-        except asyncio.CancelledError:
-            self.logger.info("InteractionWorker 任务被取消")
-        finally:
-            if self._debug_listener_task and not self._debug_listener_task.done():
-                self._debug_listener_task.cancel()
-            self.logger.info("InteractionWorker 已停止运行")
+        # The main loop is now in InvestigationManager, which calls the appropriate handler.
 
     async def _listen_for_debug_events(self):
         self.logger.info("IAST/CDP事件监听器已启动。")
@@ -89,22 +72,25 @@ class InteractionWorker:
         except asyncio.CancelledError:
             self.logger.info("IAST/CDP事件监听器已关闭。")
 
-    async def handle_interaction_event(self, event: Dict[str, Any]):
-        if not self.auto_security_testing or event.get('interaction_type') not in self.interaction_types:
+    async def analyze_interaction_chain(self, event_chain: List[Dict[str, Any]]):
+        if not self.auto_security_testing or not event_chain:
             return
+        
+        last_event = event_chain[-1]
         if not self.target_url:
-            self.target_url = event.get('url')
-        self.logger.info(f"接收到新的[交互]分析任务: {event.get('interaction_type')} on {event.get('url')}")
-        asyncio.create_task(self._perform_analysis_workflow(event))
+            self.target_url = last_event.get('url')
+        
+        self.logger.info(f"接收到包含 {len(event_chain)} 个事件的[交互链]分析任务，最终动作为: {last_event.get('interaction_type')} on {last_event.get('url')}")
+        asyncio.create_task(self._perform_analysis_workflow(event_chain))
 
-    async def analyze_url(self, event: Dict[str, Any]):
+    async def analyze_url(self, nav_info: Dict[str, Any]):
         """对导航事件中的URL参数进行轻量级DAST测试。"""
         if not self.auto_security_testing:
             return
         
-        url = event.get('url')
-        self.logger.info(f"接收到新的[URL]分析任务: {url}")
-        asyncio.create_task(self._test_url_params(url, event.get('auth_state')))
+        url = nav_info.get('url')
+        self.logger.info(f"开始对URL参数进行DAST测试: {url}")
+        asyncio.create_task(self._test_url_params(url, nav_info.get('auth_state')))
 
     async def _load_js_hooks(self):
         try:
@@ -122,27 +108,54 @@ class InteractionWorker:
             except Exception as e:
                 self.logger.error(f"为页面 {page.url} 注入IAST Hooks失败: {e}")
 
-    async def _perform_analysis_workflow(self, event: Dict[str, Any]):
+    async def _perform_analysis_workflow(self, event_chain: List[Dict[str, Any]]):
         context: Optional[BrowserContext] = None
         async with self.concurrency_semaphore:
             try:
                 context = await self.browser_pool.acquire()
                 page = await context.new_page()
                 await self._setup_page_for_analysis(page)
-                if event.get('auth_state'):
-                    await auth_tools.inject_auth_state(page, event['auth_state'])
-                await browser_tools.navigate(page, event['url'])
+
+                initial_event = event_chain[0]
+                if initial_event.get('auth_state'):
+                    await auth_tools.inject_auth_state(page, initial_event['auth_state'])
+                await browser_tools.navigate(page, initial_event['url'])
+
+                prerequisite_chain = event_chain[:-1]
+                for event in prerequisite_chain:
+                    self.logger.info(f"重放前置操作: {event.get('interaction_type')} on {event.get('element_info', {}).get('selector')}")
+                    try:
+                        await self._replay_single_interaction(page, event)
+                    except Exception as e:
+                        self.logger.warning(f"重放前置操作失败，可能会影响分析准确性: {e}")
                 
-                snapshot = await self._create_interaction_snapshot(page, event)
-                analysis_results = await self._run_full_analysis(page, snapshot, event)
+                final_event = event_chain[-1]
+                self.logger.info(f"开始对最终操作进行深度分析: {final_event.get('interaction_type')}")
+                snapshot = await self._create_interaction_snapshot(page, final_event)
+                analysis_results = await self._run_full_analysis(page, snapshot, final_event)
                 
                 if self.generate_interaction_reports:
-                    await self._accumulate_and_report(event, snapshot, analysis_results)
+                    await self._accumulate_and_report(final_event, snapshot, analysis_results)
+
             except Exception as e:
-                self.logger.error(f"交互分析工作流发生错误: {e}", exc_info=True)
+                self.logger.error(f"状态化重放分析工作流发生错误: {e}", exc_info=True)
             finally:
                 if context:
                     await self.browser_pool.release(context)
+
+    async def _replay_single_interaction(self, page: Page, event: Dict[str, Any]):
+        interaction_type = event.get('interaction_type')
+        element_info = event.get('element_info', {})
+        selector = element_info.get('selector')
+        if not selector:
+            return
+
+        if interaction_type == 'click' or interaction_type == 'submit':
+            await page.click(selector, timeout=15000, force=True)
+        elif interaction_type == 'input':
+            await page.fill(selector, element_info.get('text', 'aegis_replay'), timeout=15000)
+        
+        await asyncio.sleep(0.5)
 
     async def _run_full_analysis(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -313,12 +326,11 @@ class InteractionWorker:
         findings = []
         target_selector = snapshot.get('target_element', {}).get('selector')
         if event.get('interaction_type') == 'input' and target_selector:
-            # ... (existing DAST logic) ...
-            pass # Placeholder for brevity
+            # ... (SSTI and other DAST logic will go here)
+            pass
         return {'security_findings': findings}
 
-    async def _test_url_params(self, url: str, auth_state: Optional[Dict]) -> None: 
-        """加载规则，解析URL，并对匹配的参数进行DAST测试。"""
+    async def _test_url_params(self, url: str, auth_state: Optional[Dict]):
         self.logger.info(f"开始对URL参数进行DAST测试: {url}")
         try:
             rules_file = os.path.join(os.path.dirname(__file__), '..', 'dast_payloads', 'url_param_tests.yaml')
@@ -334,7 +346,6 @@ class InteractionWorker:
             if not query_params:
                 return
 
-            # 使用单个浏览器上下文进行所有参数测试
             async with self.concurrency_semaphore:
                 context = await self.browser_pool.acquire()
                 try:
@@ -367,7 +378,6 @@ class InteractionWorker:
                 query_params = parse_qs(parsed_url.query)
                 query_params[param_name] = [payload['value']]
                 
-                # 构建新的URL
                 new_query = urlencode(query_params, doseq=True)
                 test_url = urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, parsed_url.params, new_query, parsed_url.fragment))
                 
@@ -383,10 +393,9 @@ class InteractionWorker:
                         'evidence': f"URL: {test_url}",
                         'source': 'dast_url_param_scan'
                     }
-                    # 将发现放入累积列表并触发报告
                     self.cumulative_findings.append(self._standardize_findings({}, {"target_element":{}}, {'llm_analysis':None, 'shadow_browser_test_results':{'security_findings':[finding]}})[0])
                     self.logger.warning(f"高危发现: {finding['description']}")
-                    break # 找到一个就停止对这个参数的测试
+                    break
 
             except Exception as e:
                 self.logger.warning(f"执行参数 '{param_name}' 的Payload '{payload.get('name')}' 测试失败: {e}")

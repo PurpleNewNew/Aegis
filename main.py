@@ -2,9 +2,7 @@ import asyncio
 import logging
 import yaml
 import os
-import time
-from playwright.async_api import async_playwright, Browser, Playwright
-from urllib.parse import urlparse
+from playwright.async_api import async_playwright, Browser
 
 # 禁用ChromaDB遥测功能以防止网络连接警告
 os.environ['ANONYMIZED_TELEMETRY'] = 'False'
@@ -18,7 +16,8 @@ from src.queues.queues import (
     debug_events_q,
     ai_output_q,
     reporter_q,
-    memory_q
+    memory_q,
+    controller_status_q
 )
 
 # 导入组件
@@ -28,50 +27,14 @@ from src.workers.investigation_manager import InvestigationManager
 from src.workers.broadcaster import Broadcaster
 from src.workers.reporter_worker import ReporterWorker
 from src.workers.memory_worker import MemoryWorker
-from src.tools import auth_tools
-
-async def wait_for_browser(playwright: Playwright, config: dict) -> Browser:
-    """
-    等待并重复尝试连接到远程调试端口，直到成功。
-    """
-    port = config['browser']['remote_debugging_port']
-    retry_interval = config.get('browser', {}).get('connection_retry_interval', 5)
-    
-    while True:
-        try:
-            logging.info(f"正在尝试连接到端口 {port} 上的Chrome浏览器...")
-            browser = await playwright.chromium.connect_over_cdp(f"http://localhost:{port}")
-            logging.info("✅ 成功连接到Chrome浏览器！")
-            browser.on("disconnected", lambda: logging.error("与主浏览器的连接已断开！请重启Aegis和浏览器。"))
-            return browser
-        except Exception as e:
-            if "ECONNREFUSED" in str(e):
-                logging.info(f"连接被拒绝。正在等待浏览器在端口 {port} 上启动... 将在 {retry_interval} 秒后重试。")
-            else:
-                logging.warning(f"连接浏览器时发生未知错误: {e}")
-            await asyncio.sleep(retry_interval)
-
-def is_in_whitelist(url: str, config: dict) -> bool:
-    """检查URL是否在白名单内。"""
-    whitelist_domains = config.get('scanner_scope', {}).get('whitelist_domains', [])
-    if not url or not url.startswith(('http://', 'https://')):
-        return False
-    if not whitelist_domains:
-        return False
-    try:
-        hostname = urlparse(url).hostname
-        if not hostname:
-            return False
-        return any(hostname == domain or hostname.endswith(f'.{domain}') for domain in whitelist_domains)
-    except Exception:
-        return False
 
 async def main():
     """
-    初始化并运行Aegis应用的所有组件，采用集中式Playwright和浏览器连接管理。
+    初始化并运行Aegis应用的所有组件，采用集中式Playwright生命周期管理。
     """
-    logging.info("Aegis应用正在启动 (vFinal - 增强启动逻辑)...")
+    logging.info("Aegis应用正在启动 (vFinal - 集中式Playwright管理)...")
 
+    # 1. 加载配置
     try:
         with open('config.yaml', 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
@@ -88,36 +51,28 @@ async def main():
     playwright = None
     browser = None
     try:
+        # --------------------------------------------------------------------
+        # 步骤 1: 集中启动Playwright
+        # --------------------------------------------------------------------
         playwright = await async_playwright().start()
-        browser = await wait_for_browser(playwright, config)
+        logging.info("Playwright引擎已启动。")
 
-        # --- 增强的启动逻辑 --- #
-        logging.info("正在扫描已打开的标签页以获取初始认证和目标...")
-        initial_auth_state = None
-        initial_targets = []
-        if browser.contexts:
-            context = browser.contexts[0]
-            for page in context.pages:
-                if is_in_whitelist(page.url, config):
-                    logging.info(f"发现白名单内的已打开页面: {page.url}")
-                    if not initial_auth_state:
-                        logging.info(f"将页面 {page.url} 作为认证状态来源。")
-                        initial_auth_state = await auth_tools.extract_full_auth_state(page)
-                    initial_targets.append({'event_type': 'navigation', 'url': page.url, 'auth_state': initial_auth_state})
-        
-        if initial_targets:
-            logging.info(f"已从打开的标签页中识别出 {len(initial_targets)} 个初始调查目标。")
-            for target in initial_targets:
-                await navigation_q.put(target)
-        else:
-            logging.info("未发现已打开的白名单页面。将等待新的导航事件。")
-        # --- 启动逻辑结束 --- #
+        # --------------------------------------------------------------------
+        # 步骤 2: 连接到主浏览器
+        # --------------------------------------------------------------------
+        browser_config = config.get('browser', {})
+        browser = await playwright.chromium.connect_over_cdp(f"http://localhost:{browser_config['remote_debugging_port']}")
+        logging.info("成功连接到主浏览器实例。")
 
-        logging.info("正在初始化所有核心服务...")
-        scout = CDPController(output_q=navigation_q, config=config)
-        debugger = CDPDebugger(output_q=debug_events_q, config=config)
+        # --------------------------------------------------------------------
+        # 步骤 3: 协同初始化，传入共享的实例
+        # --------------------------------------------------------------------
         manager = InvestigationManager(input_q=navigation_q, output_q=ai_output_q, debug_q=debug_events_q, config=config)
-        await manager.initialize(browser, playwright, initial_auth_state)
+        await manager.initialize(browser, playwright)
+        logging.info("调查管理器和浏览器池初始化成功。")
+
+        scout = CDPController(output_q=navigation_q, config=config)
+        debugger = CDPDebugger(output_q=debug_events_q, config=config, playwright=playwright)
         broadcaster = Broadcaster(input_q=ai_output_q, output_queues=[reporter_q, memory_q])
         reporter = ReporterWorker(input_q=reporter_q, config=config)
         memory = MemoryWorker(input_q=memory_q, config=config)
@@ -131,22 +86,48 @@ async def main():
             asyncio.create_task(memory.run(), name="MemoryWorker")
         ])
 
-        logging.info(f"Aegis所有 {len(running_tasks)} 个模块已启动。")
+        # --------------------------------------------------------------------
+        # 步骤 4: 运行
+        # --------------------------------------------------------------------
+        logging.info(f"Aegis所有 {len(running_tasks)} 个模块已启动。请开始浏览网页...")
         await asyncio.gather(*running_tasks)
 
     except asyncio.CancelledError:
         logging.info("应用主任务收到关闭信号...")
     finally:
         logging.info("正在优雅地关闭所有服务...")
+
         for task in running_tasks:
-            task.cancel()
-        await asyncio.gather(*running_tasks, return_exceptions=True)
+            if not task.done():
+                task.cancel()
+        
+        results = await asyncio.gather(*running_tasks, return_exceptions=True)
+        for i, result in enumerate(results):
+            task_name = running_tasks[i].get_name()
+            if isinstance(result, asyncio.CancelledError):
+                logging.info(f"任务 '{task_name}' 已成功取消。")
+            elif isinstance(result, Exception):
+                logging.warning(f"任务 '{task_name}' 在关闭时出现异常: {result}")
+        
+        logging.info("所有后台任务已停止。")
+
         if manager:
-            await manager.close()
+            try:
+                await asyncio.wait_for(manager.close(), timeout=15.0)
+                logging.info("调查管理器已安全关闭。")
+            except asyncio.TimeoutError:
+                logging.warning("调查管理器关闭超时。")
+            except Exception as e:
+                logging.error(f"关闭调查管理器时发生严重错误: {e}", exc_info=True)
+        
         if browser and browser.is_connected():
             await browser.close()
+            logging.info("主浏览器连接已关闭。")
+
         if playwright:
             await playwright.stop()
+            logging.info("Playwright引擎已关闭。")
+
         logging.info("Aegis已完全关闭。")
 
 if __name__ == "__main__":
