@@ -1,0 +1,25 @@
+- name: "Generic SSTI Check on Common Params"
+  # 当URL参数名匹配以下任意一个时，触发SSTI测试
+  params:
+    - "template"
+    - "view"
+    - "name"
+    - "id"
+    - "msg"
+    - "data"
+  # 指定使用的Payload文件
+  test_payload_file: "ssti.yaml"
+
+- name: "Generic Input Validation on Common Params"
+  # 当URL参数名匹配以下任意一个时，触发通用输入验证
+  params:
+    - "q"
+    - "search"
+    - "query"
+    - "keyword"
+    - "id"
+    - "item"
+    - "page"
+    - "file"
+    - "path"
+  test_payload_file: "generic_validation.yaml"

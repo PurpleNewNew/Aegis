@@ -52,7 +52,6 @@ def get_interaction_analysis_prompt(interaction_type: str, snapshot: Dict[str, A
         "**交互快照信息**:",
         f"- URL: {snapshot.get('url', 'N/A')}",
         f"- 页面标题: {snapshot.get('title', 'N/A')}",
-        f"- 目标元素: `{snapshot.get('target_element', {}).get('selector')}`",
     ]
 
     if reasoning_level in ['medium', 'high']:
@@ -103,7 +102,10 @@ def get_interaction_analysis_prompt(interaction_type: str, snapshot: Dict[str, A
             has_dynamic_findings = True
             prompt_lines.append("- **IAST运行时警报**: (捕获到高风险JS调用)")
             for finding in iast_findings[:2]:
-                prompt_lines.append(f"  - **[Hook]** 危险函数`{finding.get('sink')}`被调用，传入值: {str(finding.get('value'))[:100]}...")
+                if finding.get('type') == 'cdp_event':
+                    prompt_lines.append(f"  - **[CDP]** 在`{finding.get('trigger')}`事件中，函数`{finding.get('function_name')}`被调用。捕获变量: {json.dumps(finding.get('variables', {}))}")
+                elif finding.get('type') == 'iast_event':
+                    prompt_lines.append(f"  - **[Hook]** 危险函数`{finding.get('sink')}`被调用，传入值: {str(finding.get('value'))[:100]}...")
 
         if not has_dynamic_findings:
             prompt_lines.append("无动态分析发现。")
@@ -112,14 +114,27 @@ def get_interaction_analysis_prompt(interaction_type: str, snapshot: Dict[str, A
         "",
         "**分析要求**:",
         "1. 综合以上所有信息（特别是深度动态分析情报），分析此交互点是否存在特定的安全风险。",
-        "2. 不要提出宽泛、通用的建议，你的分析必须基于上面提供的具体情报。",
-        "3. 如果动态分析情报中存在明确的漏洞证据（如XSS、SSTI、密钥泄露），请直接在风险评估中指出。",
+        "2. 你的分析必须基于上面提供的具体情报。",
+        "3. 提供具体的安全建议。",
         "",
         "**输出格式**:",
-        "请以JSON格式返回分析结果，包含以下字段：",
-        "```json",
-        '{"risk_assessment": "风险等级 (Critical/High/Medium/Low/Informational)", "analysis_summary": "(string) 对你发现的具体问题的简要总结。如果没有发现，请说明理由。", "security_recommendations": ["具体的建议1", "具体的建议2"]}',
-        "```",
+        "请以JSON格式返回分析结果。",
+    ])
+
+    if reasoning_level == 'high':
+        prompt_lines.extend([
+            "```json",
+            '{"risk_assessment": "风险等级", "analysis_summary": "总结", "security_recommendations": ["建议1"], "potential_attack_vectors": ["攻击向量1"]}',
+            "```",
+        ])
+    else:
+        prompt_lines.extend([
+            "```json",
+            '{"risk_assessment": "风险等级", "analysis_summary": "总结"}',
+            "```",
+        ])
+
+    prompt_lines.extend([
         "",
         "**重要提醒**: 你的回复必须仅仅是JSON对象，不包含任何其他文本。",
     ])
@@ -193,7 +208,8 @@ def get_agent_reasoning_prompt(goal: str, history: List[Dict[str, Any]], observa
         "",
         "**输出要求**: 你的回答**必须**是JSON对象，包含 `thought` 和 `tool_call` 两个键。",
         "**JSON输出示例**: ",
-        '```json\n{ "thought": "点击注册按钮探索功能", "tool_call": { "name": "click_element", "args": { "selector": "[data-aegis-id=\"aegis-el-7\"]" } } }\n```',        "**关键指令**: 你的整个回复**必须**仅仅是JSON对象，不包含任何其他文本。",
+        '```json\n{ "thought": "点击注册按钮探索功能", "tool_call": { "name": "click_element", "args": { "selector": "[data-aegis-id=\"aegis-el-7\"]" } } }\n```',
+        "**关键指令**: 你的整个回复**必须**仅仅是JSON对象，不包含任何其他文本。",
     ])
 
     return "\n".join(prompt_lines)

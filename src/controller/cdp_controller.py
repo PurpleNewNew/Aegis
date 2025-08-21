@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from asyncio import Queue
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from playwright.async_api import Page, Frame, Browser
 from typing import Dict, Any, Optional
 from src.tools import auth_tools
@@ -17,7 +17,16 @@ class CDPController:
         self.config = config
         self.whitelist_domains = config.get('scanner_scope', {}).get('whitelist_domains', [])
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.reported_urls = set()
+        self.reported_endpoints = set() # 修改：从记录完整URL改为记录规范化后的端点
+
+    def _normalize_url(self, url: str) -> str:
+        """将URL规范化，去除查询参数和片段，得到基础端点。"""
+        try:
+            parsed = urlparse(url)
+            # 只保留 scheme, netloc, path
+            return urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+        except Exception:
+            return url # 解析失败则返回原URL
 
     def _is_in_whitelist(self, url: str) -> bool:
         if not url or not url.startswith(('http://', 'https://')):
@@ -36,26 +45,38 @@ class CDPController:
         except Exception:
             return False
 
-    
-
     async def handle_frame_navigated(self, frame: Frame):
         try:
-            if not frame.page or not frame.page.context or not frame.page.context.browser or not frame.page.context.browser.is_connected():
+            if not frame.page or frame.page.is_closed() or not frame.page.context or not frame.page.context.browser or not frame.page.context.browser.is_connected():
                 return
             if frame.parent_frame:
                 return
         except Exception:
             return
             
-        url = frame.url
-        if url in self.reported_urls or not self._is_in_whitelist(url):
+        full_url = frame.url
+        if not self._is_in_whitelist(full_url):
             return
 
+        endpoint = self._normalize_url(full_url)
+        is_new_endpoint = endpoint not in self.reported_endpoints
+
         try:
-            self.logger.info(f"侦察到新的导航目标: {url}")
-            self.reported_urls.add(url)
+            self.logger.info(f"侦察到导航: {full_url} (端点: {endpoint}, 是否全新: {is_new_endpoint})")
+            if is_new_endpoint:
+                self.reported_endpoints.add(endpoint)
+            
             auth_state = await auth_tools.extract_full_auth_state(frame.page)
-            await self.output_q.put({'event_type': 'navigation', 'url': url, 'auth_state': auth_state})
+            
+            event_data = {
+                'event_type': 'navigation',
+                'url': full_url,
+                'endpoint': endpoint,
+                'is_new_endpoint': is_new_endpoint,
+                'auth_state': auth_state
+            }
+            await self.output_q.put(event_data)
+
         except Exception as e:
             self.logger.warning(f"处理导航事件时出错（可能是浏览器已关闭）: {e}")
 
@@ -151,22 +172,18 @@ class CDPController:
                 self.logger.error("传入的浏览器实例未连接！")
                 return
 
-            # 假设浏览器至少有一个上下文
             if not browser.contexts:
-                logging.warning("浏览器没有活动的上下文。可能无法捕获任何事件。")
-                # 可以在这里等待，或者依赖于 "page" 事件
+                logging.warning("浏览器没有活动的上下文。")
+                return
 
             context = browser.contexts[0]
             
-            # 为已存在的页面设置监听器
             for page in context.pages:
                 await self.setup_page_listeners(page)
             
-            # 为未来新打开的页面设置监听器
             context.on("page", self.setup_page_listeners)
 
             self.logger.info("侦察兵已在所有现有和未来页面上设置监听器。")
-            # 保持运行以持续监听
             await asyncio.Event().wait()
 
         except asyncio.CancelledError:
