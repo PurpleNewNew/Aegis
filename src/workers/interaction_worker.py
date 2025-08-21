@@ -71,7 +71,7 @@ class InteractionWorker:
             self.logger.info("InteractionWorker 已停止运行")
 
     async def _listen_for_debug_events(self):
-        self.logger.info("IAST/CDP事件监听器已启动。" )
+        self.logger.info("IAST/CDP事件监听器已启动。")
         try:
             while True:
                 debug_event = await self.debug_events_q.get()
@@ -79,7 +79,7 @@ class InteractionWorker:
                 self.iast_findings.append(debug_event)
                 self.debug_events_q.task_done()
         except asyncio.CancelledError:
-            self.logger.info("IAST/CDP事件监听器已关闭。" )
+            self.logger.info("IAST/CDP事件监听器已关闭。")
 
     async def handle_interaction_event(self, event: Dict[str, Any]):
         if not self.auto_security_testing or event.get('interaction_type') not in self.interaction_types:
@@ -93,7 +93,7 @@ class InteractionWorker:
         try:
             async with aiofiles.open('src/tools/js_hooks.js', mode='r', encoding='utf-8') as f:
                 self.js_hook_script = await f.read()
-                self.logger.info("IAST JS Hook脚本加载成功。" )
+                self.logger.info("IAST JS Hook脚本加载成功。")
         except Exception as e:
             self.logger.error(f"加载IAST JS Hook脚本失败: {e}")
 
@@ -197,11 +197,13 @@ class InteractionWorker:
             'timestamp': asyncio.get_event_loop().time()
         }
         await self.output_q.put(report_data)
-        self.logger.info(f"已输出包含 {len(self.cumulative_findings)} 个发现的累积报告。" )
+        self.logger.info(f"已输出包含 {len(self.cumulative_findings)} 个发现的累积报告。")
         self.cumulative_findings = []
 
     async def _create_interaction_snapshot(self, page: Page, event: Dict[str, Any]) -> Dict[str, Any]:
-        page_content = await browser_tools.get_web_content(page)
+        self.logger.info("创建交互点快照...")
+        # CRITICAL FIX: Use page.content() directly to get the full source with script tags.
+        page_content = await page.content()
         sast_results = {
             'secrets': secret_scanner.find_secrets(page_content),
             'xss_sinks': xss_scanner.find_xss_sinks(page_content),
@@ -223,12 +225,14 @@ class InteractionWorker:
             await asyncio.sleep(0.5)
 
             results = await asyncio.gather(
+                self._analyze_js_and_crypto(page, snapshot, event),
                 self._analyze_network_packets(page, snapshot, event),
                 self._run_shadow_browser_test(page, snapshot, event),
                 return_exceptions=True
             )
-            analysis_results['network_packet_analysis'] = results[0] if not isinstance(results[0], Exception) else None
-            analysis_results['shadow_browser_test_results'] = results[1] if not isinstance(results[1], Exception) else None
+            analysis_results['js_crypto_analysis'] = results[0] if not isinstance(results[0], Exception) else None
+            analysis_results['network_packet_analysis'] = results[1] if not isinstance(results[1], Exception) else None
+            analysis_results['shadow_browser_test_results'] = results[2] if not isinstance(results[2], Exception) else None
             
             analysis_results['iast_findings'] = self.iast_findings.copy()
             self.iast_findings.clear()
@@ -236,6 +240,17 @@ class InteractionWorker:
         if self.enable_llm_analysis:
             analysis_results['llm_analysis'] = await self._perform_llm_analysis(snapshot, event, analysis_results)
         return analysis_results
+
+    async def _analyze_js_and_crypto(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Actively looks for crypto functions and variables."""
+        self.logger.info("开始主动分析JS加密函数...")
+        try:
+            crypto_info = await browser_tools.get_crypto_functions(page)
+            self.logger.info(f"JS加密分析完成。")
+            return json.loads(crypto_info)
+        except Exception as e:
+            self.logger.error(f"JS加密分析失败: {e}")
+            return None
 
     async def _analyze_network_packets(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         sniffer = NetworkSniffer()
@@ -246,7 +261,8 @@ class InteractionWorker:
                 try:
                     interaction_type = event.get('interaction_type')
                     if interaction_type in ['click', 'submit']:
-                        await page.click(target_selector, timeout=5000)
+                        # Use a gentle click that doesn't wait for navigation
+                        await page.click(target_selector, timeout=5000, no_wait_after=True)
                     elif interaction_type == 'input':
                         await page.fill(target_selector, 'aegis_test_input', timeout=5000)
                         await page.press(target_selector, 'Enter')
@@ -260,12 +276,32 @@ class InteractionWorker:
             return None
 
     async def _run_shadow_browser_test(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        return {'security_findings': []}
+        # A basic DAST check for SSTI as a proof of concept
+        findings = []
+        target_selector = snapshot.get('target_element', {}).get('selector')
+        if event.get('interaction_type') == 'input' and target_selector:
+            try:
+                ssti_payload = "{{7*7}}"
+                await page.fill(target_selector, ssti_payload)
+                await page.press(target_selector, 'Enter')
+                await asyncio.sleep(1)
+                content = await page.content()
+                if "49" in content and ssti_payload not in content:
+                    findings.append({
+                        'type': 'SSTI',
+                        'severity': 'High',
+                        'description': 'Input field seems vulnerable to SSTI.',
+                        'payload': ssti_payload
+                    })
+            except Exception as e:
+                self.logger.warning(f"SSTI影人浏览器测试失败: {e}")
+        return {'security_findings': findings}
 
     async def _perform_llm_analysis(self, snapshot: Dict[str, Any], event: Dict[str, Any], results: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
             level = self.config.get('llm_service', {}).get('reasoning_level', 'high')
-            prompt = get_interaction_analysis_prompt(event.get('interaction_type'), snapshot, results, "分析用户交互点的安全风险，提供针对性的安全建议", level)
+            goal = "分析用户交互点的安全风险，提供针对性的安全建议"
+            prompt = get_interaction_analysis_prompt(event.get('interaction_type'), snapshot, results, goal, level)
             llm_result = await self._call_llm(prompt)
             if 'error' in llm_result: return None
             return json.loads(llm_result['response'])

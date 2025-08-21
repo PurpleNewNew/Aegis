@@ -52,6 +52,7 @@ def get_interaction_analysis_prompt(interaction_type: str, snapshot: Dict[str, A
         "**交互快照信息**:",
         f"- URL: {snapshot.get('url', 'N/A')}",
         f"- 页面标题: {snapshot.get('title', 'N/A')}",
+        f"- 目标元素: `{snapshot.get('target_element', {}).get('selector')}`",
     ]
 
     if reasoning_level in ['medium', 'high']:
@@ -60,58 +61,65 @@ def get_interaction_analysis_prompt(interaction_type: str, snapshot: Dict[str, A
         if sast_results and any(findings for findings in sast_results.values()):
             for tool_name, findings in sast_results.items():
                 if findings:
-                    prompt_lines.append(f"- **{tool_name}**:")
-                    for finding in findings[:3]:
-                        prompt_lines.append(f"  - {json.dumps(finding, ensure_ascii=False)}")
+                    prompt_lines.append(f"- **{tool_name}**: 发现 {len(findings)} 个问题")
+                    for finding in findings[:2]: # Limit to 2 for brevity
+                        prompt_lines.append(f"  - {str(finding)[:200]}...")
         else:
             prompt_lines.append("无SAST发现")
 
     if reasoning_level == 'high':
         prompt_lines.append("\n**深度动态分析情报**: (这是我们通过模拟交互、注入探针等方式获得的、最有价值的证据)")
-        network_analysis = analysis_results.get('network_packet_analysis')
-        if network_analysis and network_analysis.get('api_calls'):
-            prompt_lines.append(f"- **网络API调用分析**: (共发现 {network_analysis.get('summary',{}).get('xhr_fetch_requests', 0)} 个API调用)")
-            for api_call in network_analysis['api_calls'][:2]:
-                prompt_lines.append(f"  - **API**: `{api_call.get('method')} {api_call.get('url')}`")
-                if api_call.get('potential_issues'):
-                    prompt_lines.append(f"    - **潜在问题**: {', '.join(api_call['potential_issues'])}")
-        else:
-            prompt_lines.append("- **网络API调用分析**: 未捕获到API调用。")
+        has_dynamic_findings = False
 
+        # JS & Crypto Analysis
+        js_crypto_analysis = analysis_results.get('js_crypto_analysis')
+        if js_crypto_analysis and js_crypto_analysis.get('findings'):
+            has_dynamic_findings = True
+            prompt_lines.append(f"- **JS/加密分析**: 发现 {len(js_crypto_analysis['findings'])} 个潜在问题")
+            for finding in js_crypto_analysis['findings'][:2]:
+                prompt_lines.append(f"  - {finding.get('description')}")
+
+        # Network Packet Analysis
+        network_analysis = analysis_results.get('network_packet_analysis')
+        if network_analysis and network_analysis.get('requests'):
+            has_dynamic_findings = True
+            prompt_lines.append(f"- **网络数据包分析**: 捕获到 {len(network_analysis['requests'])} 个相关请求")
+            if network_analysis.get('security_findings'):
+                prompt_lines.append("  - **初步发现**: ")
+                for finding in network_analysis['security_findings']:
+                    prompt_lines.append(f"    - {finding.get('description')}")
+
+        # Shadow Browser DAST
+        shadow_analysis = analysis_results.get('shadow_browser_test_results')
+        if shadow_analysis and shadow_analysis.get('security_findings'):
+            has_dynamic_findings = True
+            prompt_lines.append(f"- **影子浏览器主动测试**: 发现 {len(shadow_analysis['security_findings'])} 个潜在问题")
+            for finding in shadow_analysis['security_findings']:
+                prompt_lines.append(f"  - {finding.get('description')}")
+
+        # IAST Findings
         iast_findings = analysis_results.get('iast_findings', [])
         if iast_findings:
+            has_dynamic_findings = True
             prompt_lines.append("- **IAST运行时警报**: (捕获到高风险JS调用)")
             for finding in iast_findings[:2]:
-                if finding.get('type') == 'cdp_event':
-                    prompt_lines.append(f"  - **[CDP]** 在`{finding.get('trigger')}`事件中，函数`{finding.get('function_name')}`被调用。捕获变量: {json.dumps(finding.get('variables', {}))}")
-                elif finding.get('type') == 'iast_event':
-                    prompt_lines.append(f"  - **[Hook]** 危险函数`{finding.get('sink')}`被调用，传入值: {finding.get('value')}")
+                prompt_lines.append(f"  - **[Hook]** 危险函数`{finding.get('sink')}`被调用，传入值: {str(finding.get('value'))[:100]}...")
+
+        if not has_dynamic_findings:
+            prompt_lines.append("无动态分析发现。")
 
     prompt_lines.extend([
         "",
         "**分析要求**:",
-        "1. 综合以上所有信息，分析此交互点是否存在特定的安全风险。",
-        "2. 你的分析必须基于上面提供的具体情报。",
-        "3. 提供具体的安全建议。",
+        "1. 综合以上所有信息（特别是深度动态分析情报），分析此交互点是否存在特定的安全风险。",
+        "2. 不要提出宽泛、通用的建议，你的分析必须基于上面提供的具体情报。",
+        "3. 如果动态分析情报中存在明确的漏洞证据（如XSS、SSTI、密钥泄露），请直接在风险评估中指出。",
         "",
         "**输出格式**:",
-        "请以JSON格式返回分析结果。",
-    ])
-
-    if reasoning_level == 'high':
-        prompt_lines.extend([
-            "```json",
-            '{"risk_assessment": "风险等级", "analysis_summary": "总结", "security_recommendations": ["建议1"], "potential_attack_vectors": ["攻击向量1"]}',
-            "```",
-        ])
-    else:
-        prompt_lines.extend([
-            "```json",
-            '{"risk_assessment": "风险等级", "analysis_summary": "总结"}',
-            "```",
-        ])
-
-    prompt_lines.extend([
+        "请以JSON格式返回分析结果，包含以下字段：",
+        "```json",
+        '{"risk_assessment": "风险等级 (Critical/High/Medium/Low/Informational)", "analysis_summary": "(string) 对你发现的具体问题的简要总结。如果没有发现，请说明理由。", "security_recommendations": ["具体的建议1", "具体的建议2"]}',
+        "```",
         "",
         "**重要提醒**: 你的回复必须仅仅是JSON对象，不包含任何其他文本。",
     ])
@@ -185,8 +193,7 @@ def get_agent_reasoning_prompt(goal: str, history: List[Dict[str, Any]], observa
         "",
         "**输出要求**: 你的回答**必须**是JSON对象，包含 `thought` 和 `tool_call` 两个键。",
         "**JSON输出示例**: ",
-        '```json\n{ "thought": "点击注册按钮探索功能", "tool_call": { "name": "click_element", "args": { "selector": "[data-aegis-id=\"aegis-el-7\"]" } } }\n```',
-        "**关键指令**: 你的整个回复**必须**仅仅是JSON对象，不包含任何其他文本。"
+        '```json\n{ "thought": "点击注册按钮探索功能", "tool_call": { "name": "click_element", "args": { "selector": "[data-aegis-id=\"aegis-el-7\"]" } } }\n```',        "**关键指令**: 你的整个回复**必须**仅仅是JSON对象，不包含任何其他文本。",
     ])
 
     return "\n".join(prompt_lines)

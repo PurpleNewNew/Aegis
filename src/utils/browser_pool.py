@@ -52,7 +52,6 @@ class AuthSynchronizer:
         try:
             return await self.pool.main_browser.contexts[0].storage_state()
         except Exception as e:
-            # This can happen during shutdown, so we log at a lower level
             if "closed" in str(e).lower():
                 self.logger.debug(f"获取主浏览器认证状态失败，连接已关闭: {e}")
             else:
