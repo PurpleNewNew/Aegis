@@ -38,57 +38,39 @@ class CDPDebugger:
             return False
 
     async def _on_paused(self, event: Dict[str, Any], session: CDPSession, page_url: str):
-        """处理断点暂停，通过URL黑盒化所有非目标脚本，精确捕获业务逻辑。"""
+        """(简化版) 处理断点暂停，直接分析第一个捕获到的帧。"""
         try:
+            if not self._is_in_whitelist(page_url):
+                return
+
             call_frames = event.get('callFrames', [])
             if not call_frames:
-                await session.send('Debugger.resume')
                 return
 
-            # 核心逻辑：检查顶层调用栈的URL
             top_frame = call_frames[0]
-            frame_url = top_frame.get('url', '')
-            script_id = top_frame.get('location', {}).get('scriptId')
-
-            # 如果URL是空的或不是HTTP/HTTPS协议，则判定为内部脚本，加入黑盒并跳过
-            if not frame_url.startswith(('http://', 'https://')):
-                self.logger.info(f"检测并黑盒化内部/注入脚本 (URL: '{frame_url}', ScriptID: {script_id})，恢复执行...")
-                if script_id:
-                    try:
-                        source_response = await session.send('Debugger.getScriptSource', {'scriptId': script_id})
-                        script_source = source_response.get('scriptSource', '')
-                        await session.send('Debugger.setBlackboxedRanges', {
-                            'scriptId': script_id,
-                            'positions': [{'lineNumber': 0, 'columnNumber': 0}, {'lineNumber': len(script_source.splitlines()), 'columnNumber': 0}]
-                        })
-                    except Exception as e:
-                        self.logger.warning(f"黑盒化脚本 {script_id} 失败: {e}")
-                await session.send('Debugger.resume')
-                return
-
-            # 如果是HTTP/HTTPS脚本，则假定为目标业务逻辑，开始分析
-            if not self._is_in_whitelist(page_url):
-                await session.send('Debugger.resume')
-                return
-
             function_name = top_frame.get('functionName', 'anonymous')
             location = top_frame.get('location', {})
+            script_id = location.get('scriptId')
             line_number = location.get('lineNumber', 0)
 
-            # 提取代码片段
-            source_response = await session.send('Debugger.getScriptSource', {'scriptId': script_id})
-            script_source = source_response.get('scriptSource', '')
-            lines = script_source.splitlines()
-            start_line = max(0, line_number - 20)
-            end_line = min(len(lines), line_number + 40)
-            snippet_lines = lines[start_line:end_line]
-            for i, line in enumerate(snippet_lines):
-                current_line_num = start_line + i + 1
-                marker = "  >> " if current_line_num == line_number + 1 else "     "
-                snippet_lines[i] = f"{current_line_num:4d}{marker}{line}"
-            code_snippet = "\n".join(snippet_lines)
+            code_snippet = 'Source not available'
+            if script_id:
+                try:
+                    source_response = await session.send('Debugger.getScriptSource', {'scriptId': script_id})
+                    script_source = source_response.get('scriptSource', '')
+                    if script_source:
+                        lines = script_source.splitlines()
+                        start_line = max(0, line_number - 20)
+                        end_line = min(len(lines), line_number + 40)
+                        snippet_lines = lines[start_line:end_line]
+                        for i, line in enumerate(snippet_lines):
+                            current_line_num = start_line + i + 1
+                            marker = "  >> " if current_line_num == line_number + 1 else "     "
+                            snippet_lines[i] = f"{current_line_num:4d}{marker}{line}"
+                        code_snippet = "\n".join(snippet_lines)
+                except Exception as e:
+                    self.logger.warning(f"获取或处理脚本源码失败 (ScriptID: {script_id}): {e}")
 
-            # 提取变量
             variables = {}
             for scope in top_frame.get('scopeChain', []):
                 if scope.get('type') in ['local', 'closure'] and scope.get('object', {}).get('objectId'):
@@ -99,7 +81,6 @@ class CDPDebugger:
                         if prop.get('value') and prop.get('value').get('type') not in ['function', 'undefined']:
                             variables[prop['name']] = str(prop.get('value').get('value', ''))[:150]
 
-            # 构建事件并发送
             debug_event = {
                 'type': 'cdp_event',
                 'timestamp': time.time(),
@@ -111,12 +92,12 @@ class CDPDebugger:
                 'call_stack': [frame.get('functionName', 'anonymous') for frame in call_frames[:5]]
             }
             
-            self.logger.info(f"成功捕获目标业务逻辑: {debug_event['trigger']} on {debug_event['function_name']}")
+            self.logger.info(f"CDP断点触发: {debug_event['trigger']} on {debug_event['function_name']}")
             await self.output_q.put(debug_event)
-            await session.send('Debugger.resume')
 
         except Exception as e:
             self.logger.error(f"处理CDP暂停事件时出错: {e}", exc_info=True)
+        finally:
             try:
                 await session.send('Debugger.resume')
             except Exception:
@@ -135,7 +116,6 @@ class CDPDebugger:
             session.on('Debugger.paused', lambda event: asyncio.create_task(self._on_paused(event, session, page_url)))
             await session.send('Debugger.enable')
             
-            # 等待页面完全加载，确保所有脚本都已解析
             self.logger.info(f"等待页面 {page.url} 完全加载...")
             await page.wait_for_load_state('load', timeout=30000)
             self.logger.info(f"页面 {page.url} 已完全加载，开始设置事件断点。")
