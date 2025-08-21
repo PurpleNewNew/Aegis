@@ -3,36 +3,24 @@ import logging
 import yaml
 import os
 from playwright.async_api import async_playwright, Browser
+from asyncio import Queue
 
-# 禁用ChromaDB遥测功能以防止网络连接警告
+# 禁用ChromaDB遥测功能
 os.environ['ANONYMIZED_TELEMETRY'] = 'False'
 
 # 配置基础日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# 导入队列
-from src.queues.queues import (
-    navigation_q,
-    debug_events_q,
-    ai_output_q,
-    reporter_q,
-    memory_q,
-    controller_status_q
-)
-
-# 导入组件
-from src.controller.cdp_controller import CDPController
+# 导入核心组件
 from src.controller.cdp_debugger import CDPDebugger
-from src.workers.investigation_manager import InvestigationManager
-from src.workers.broadcaster import Broadcaster
-from src.workers.reporter_worker import ReporterWorker
-from src.workers.memory_worker import MemoryWorker
+from src.workers.interaction_worker import InteractionWorker
 
 async def main():
     """
-    初始化并运行Aegis应用的所有组件，采用集中式Playwright生命周期管理。
+    (feature/js_re 分支版)
+    初始化并运行Aegis JS逆向分析工具。
     """
-    logging.info("Aegis应用正在启动 (vFinal - 集中式Playwright管理)...")
+    logging.info("Aegis JS逆向分析工具正在启动...")
 
     # 1. 加载配置
     try:
@@ -43,53 +31,41 @@ async def main():
         logging.error(f"加载或解析配置文件失败: {e}")
         return
 
-    os.makedirs(config.get('reporter', {}).get('output_dir', './reports'), exist_ok=True)
     os.makedirs(os.path.dirname(config.get('logging', {}).get('ai_dialogues_file', './logs/ai_dialogues.jsonl')), exist_ok=True)
 
+    # 创建连接CDPDebugger和InteractionWorker的队列
+    debug_q = Queue()
+
     running_tasks = []
-    manager = None
     playwright = None
     browser = None
     try:
-        # --------------------------------------------------------------------
-        # 步骤 1: 集中启动Playwright
-        # --------------------------------------------------------------------
+        # 步骤 1: 启动Playwright并连接到主浏览器（带重试逻辑）
         playwright = await async_playwright().start()
-        logging.info("Playwright引擎已启动。")
-
-        # --------------------------------------------------------------------
-        # 步骤 2: 连接到主浏览器
-        # --------------------------------------------------------------------
         browser_config = config.get('browser', {})
-        browser = await playwright.chromium.connect_over_cdp(f"http://localhost:{browser_config['remote_debugging_port']}")
-        logging.info("成功连接到主浏览器实例。")
+        endpoint_url = f"http://localhost:{browser_config['remote_debugging_port']}"
+        
+        while True:
+            try:
+                browser = await playwright.chromium.connect_over_cdp(endpoint_url)
+                logging.info(f"成功连接到主浏览器实例: {endpoint_url}")
+                break # 连接成功，跳出循环
+            except Exception:
+                logging.warning(f"无法连接到浏览器 {endpoint_url}，将在5秒后重试...")
+                logging.warning(f"请确保Chrome浏览器已通过 --remote-debugging-port={browser_config['remote_debugging_port']} 参数启动。")
+                await asyncio.sleep(5)
 
-        # --------------------------------------------------------------------
-        # 步骤 3: 协同初始化，传入共享的实例
-        # --------------------------------------------------------------------
-        manager = InvestigationManager(input_q=navigation_q, output_q=ai_output_q, debug_q=debug_events_q, config=config)
-        await manager.initialize(browser, playwright)
-        logging.info("调查管理器和浏览器池初始化成功。")
-
-        scout = CDPController(output_q=navigation_q, config=config)
-        debugger = CDPDebugger(output_q=debug_events_q, config=config, playwright=playwright)
-        broadcaster = Broadcaster(input_q=ai_output_q, output_queues=[reporter_q, memory_q])
-        reporter = ReporterWorker(input_q=reporter_q, config=config)
-        memory = MemoryWorker(input_q=memory_q, config=config)
+        # 步骤 2: 初始化核心组件
+        debugger = CDPDebugger(output_q=debug_q, config=config)
+        analyzer = InteractionWorker(config=config, debug_q=debug_q)
 
         running_tasks.extend([
-            asyncio.create_task(scout.run(browser), name="CDPScout"),
             asyncio.create_task(debugger.run(browser), name="CDPDebugger"),
-            asyncio.create_task(manager.run(), name="InvestigationManager"),
-            asyncio.create_task(broadcaster.run(), name="Broadcaster"),
-            asyncio.create_task(reporter.run(), name="ReporterWorker"),
-            asyncio.create_task(memory.run(), name="MemoryWorker")
+            asyncio.create_task(analyzer.run(), name="JSAnalyzer"),
         ])
 
-        # --------------------------------------------------------------------
-        # 步骤 4: 运行
-        # --------------------------------------------------------------------
-        logging.info(f"Aegis所有 {len(running_tasks)} 个模块已启动。请开始浏览网页...")
+        # 步骤 3: 运行
+        logging.info(f"Aegis所有 {len(running_tasks)} 个核心模块已启动。请在主浏览器中操作，触发加密事件...")
         await asyncio.gather(*running_tasks)
 
     except asyncio.CancelledError:
@@ -111,15 +87,6 @@ async def main():
         
         logging.info("所有后台任务已停止。")
 
-        if manager:
-            try:
-                await asyncio.wait_for(manager.close(), timeout=15.0)
-                logging.info("调查管理器已安全关闭。")
-            except asyncio.TimeoutError:
-                logging.warning("调查管理器关闭超时。")
-            except Exception as e:
-                logging.error(f"关闭调查管理器时发生严重错误: {e}", exc_info=True)
-        
         if browser and browser.is_connected():
             await browser.close()
             logging.info("主浏览器连接已关闭。")

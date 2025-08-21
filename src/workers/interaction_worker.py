@@ -1,447 +1,93 @@
 import asyncio
 import logging
 import json
-import os
-import aiofiles
-import yaml
-from typing import Dict, Any, Optional, List
-from asyncio import Task
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from typing import Dict, Any, Optional
+from asyncio import Queue
 from openai import AsyncOpenAI
-from playwright.async_api import Page, BrowserContext, Error as PlaywrightError
 
-from src.utils.browser_pool import BrowserPool
-from src.tools import browser_tools, auth_tools
-from src.tools.network_tools import NetworkSniffer
-from src.sast_tools import secret_scanner, xss_scanner, crypto_detector
-from src.prompts.prompt import get_interaction_analysis_prompt
+from src.prompts.prompt import get_js_re_prompt
 from src.utils.ai_logger import log_ai_dialogue
 
 class InteractionWorker:
     """
-    无感被动交互分析器，只在用户进行页面交互操作时进行快照+分析。
+    (feature/js_re 分支版)
+    一个轻量级的分析器，接收CDPDebugger的调试事件，
+    调用AI进行JS逆向分析，并打印结果。
     """
 
-    def __init__(self, config: dict, browser_pool: BrowserPool, concurrency_semaphore: asyncio.Semaphore, input_q, output_q, debug_events_q=None):
+    def __init__(self, config: dict, debug_q: Queue):
         self.config = config
-        self.browser_pool = browser_pool
-        self.concurrency_semaphore = concurrency_semaphore
-        self.input_q = input_q
-        self.output_q = output_q
-        self.debug_events_q = debug_events_q
+        self.debug_q = debug_q
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.js_hook_script = ""
-        self.iast_findings: List[Dict[str, Any]] = []
-        self._debug_listener_task: Optional[Task] = None
-        
-        passive_config = config.get('investigation_manager', {}).get('passive_mode', {})
-        self.analysis_depth = passive_config.get('analysis_depth', 'deep')
-        self.auto_security_testing = passive_config.get('auto_security_testing', True)
-        self.interaction_types = passive_config.get('interaction_types', ['click', 'submit', 'input'])
-        self.analysis_timeout = passive_config.get('analysis_timeout', 120)
-        self.generate_interaction_reports = passive_config.get('generate_interaction_reports', True)
-        self.enable_llm_analysis = config.get('interaction_analysis', {}).get('enable_llm', True)
-        
-        self.max_parallel_interactions = self.concurrency_semaphore._value
-        self.interaction_history = []
-        self.cumulative_findings = []
-        self.last_report_time = 0
-        self.report_interval = 60
-        self.target_url = None
         
         llm_config = self.config.get('llm_service', {})
         if llm_config and llm_config.get('api_config'):
             self.llm_client = AsyncOpenAI(base_url=llm_config['api_config'].get('base_url'), api_key=llm_config['api_config'].get('api_key'))
         else:
             self.llm_client = None
+        self.logger.info("InteractionWorker (JS逆向版) 初始化完成。")
 
     async def run(self):
-        await self._load_js_hooks()
-        self._debug_listener_task = asyncio.create_task(self._listen_for_debug_events())
-        self.logger.info("InteractionWorker 开始运行，等待事件...")
-
-    async def _listen_for_debug_events(self):
-        self.logger.info("IAST/CDP事件监听器已启动。")
-        try:
-            while True:
-                debug_event = await self.debug_events_q.get()
-                self.logger.info(f"接收到IAST/CDP调试事件: {debug_event}")
-                self.iast_findings.append(debug_event)
-                self.debug_events_q.task_done()
-        except asyncio.CancelledError:
-            self.logger.info("IAST/CDP事件监听器已关闭。")
-
-    async def analyze_interaction_chain(self, event_chain: List[Dict[str, Any]]):
-        if not self.auto_security_testing or not event_chain:
-            return
-        
-        last_event = event_chain[-1]
-        if not self.target_url:
-            self.target_url = last_event.get('url')
-        
-        self.logger.info(f"接收到包含 {len(event_chain)} 个事件的[交互链]分析任务，最终动作为: {last_event.get('interaction_type')} on {last_event.get('url')}")
-        asyncio.create_task(self._perform_analysis_workflow(event_chain))
-
-    async def analyze_url(self, nav_info: Dict[str, Any]):
-        if not self.auto_security_testing:
-            return
-        
-        url = nav_info.get('url')
-        self.logger.info(f"接收到新的[URL]分析任务: {url}")
-        asyncio.create_task(self._test_url_params(url, nav_info.get('auth_state')))
-
-    async def _load_js_hooks(self):
-        try:
-            async with aiofiles.open('src/tools/js_hooks.js', mode='r', encoding='utf-8') as f:
-                self.js_hook_script = await f.read()
-                self.logger.info("IAST JS Hook脚本加载成功。")
-        except Exception as e:
-            self.logger.error(f"加载IAST JS Hook脚本失败: {e}")
-
-    async def _setup_page_for_analysis(self, page: Page):
-        if self.js_hook_script:
+        self.logger.info("InteractionWorker (JS逆向版) 开始运行，等待调试事件...")
+        while True:
             try:
-                await page.expose_function("__aegis_iast_report__", lambda finding: self.debug_events_q.put_nowait(finding))
-                await page.add_init_script(self.js_hook_script)
+                debug_event = await self.debug_q.get()
+                await self._analyze_js_snippet(debug_event)
+                self.debug_q.task_done()
+            except asyncio.CancelledError:
+                self.logger.info("InteractionWorker 收到关闭信号。")
+                break
             except Exception as e:
-                self.logger.error(f"为页面 {page.url} 注入IAST Hooks失败: {e}")
+                self.logger.error(f"处理调试事件时发生未知错误: {e}", exc_info=True)
 
-    async def _perform_analysis_workflow(self, event_chain: List[Dict[str, Any]]):
-        context: Optional[BrowserContext] = None
-        async with self.concurrency_semaphore:
-            try:
-                context = await self.browser_pool.acquire()
-                page = await context.new_page()
-                await self._setup_page_for_analysis(page)
+    async def _analyze_js_snippet(self, debug_event: Dict[str, Any]):
+        self.logger.info(f"接收到来自 {debug_event['url']} 的JS分析任务，触发事件: {debug_event['trigger']}")
+        
+        code_snippet = debug_event.get('code_snippet')
+        variables = debug_event.get('variables')
+        url = debug_event.get('url')
 
-                initial_event = event_chain[0]
-                if initial_event.get('auth_state'):
-                    await auth_tools.inject_auth_state(page, initial_event['auth_state'])
-                
-                await browser_tools.navigate(page, initial_event['url'])
-
-                sniffer = NetworkSniffer()
-                await sniffer.start_capture(page)
-
-                for event in event_chain:
-                    self.logger.info(f"重放操作: {event.get('interaction_type')} on {event.get('element_info', {}).get('selector')}")
-                    try:
-                        await self._replay_single_interaction(page, event)
-                    except Exception as e:
-                        self.logger.warning(f"重放操作失败: {e}")
-                
-                await sniffer.stop_capture(page)
-                network_analysis = sniffer.analyze_api_calls()
-
-                final_event = event_chain[-1]
-                snapshot = await self._create_interaction_snapshot(page, final_event)
-                
-                analysis_results = await self._run_full_analysis(page, snapshot, final_event)
-                analysis_results['network_packet_analysis'] = network_analysis
-
-                if self.enable_llm_analysis:
-                    analysis_results['llm_analysis'] = await self._perform_llm_analysis(snapshot, final_event, analysis_results)
-
-                if self.generate_interaction_reports:
-                    await self._accumulate_and_report(final_event, snapshot, analysis_results)
-
-            except Exception as e:
-                self.logger.error(f"状态化重放分析工作流发生错误: {e}", exc_info=True)
-            finally:
-                if context:
-                    await self.browser_pool.release(context)
-
-    async def _replay_single_interaction(self, page: Page, event: Dict[str, Any]):
-        interaction_type = event.get('interaction_type')
-        element_info = event.get('element_info', {})
-        selector = element_info.get('selector')
-        text_content = element_info.get('text')
-
-        if not selector:
+        if not code_snippet or code_snippet == 'Source not available':
+            self.logger.warning("调试事件中不包含代码片段，跳过AI分析。")
             return
 
-        # --- 定位逻辑 ---
-        locator = page.locator(selector)
-        count = await locator.count()
-        if count > 1 and text_content:
-            self.logger.info(f"选择器 '{selector}' 匹配到 {count} 个元素，将使用文本 '{text_content}' 进行精确过滤。")
-            locator = locator.filter(has_text=text_content)
-            if await locator.count() > 1:
-                locator = locator.first
-        
-        # --- 操作逻辑 ---
-        try:
-            # 步骤1: 尝试标准Playwright操作，它会进行可见性等严格检查
-            self.logger.info(f"尝试标准Playwright操作: {interaction_type}")
-            if interaction_type == 'click' or interaction_type == 'submit':
-                await locator.click(timeout=5000) # 缩短超时，快速失败
-            elif interaction_type == 'input':
-                await locator.fill(element_info.get('text', 'aegis_replay'), timeout=5000)
-
-        except PlaywrightError as e:
-            # 步骤2: 如果标准操作失败，启动B计划：JavaScript强制点击
-            self.logger.warning(f"标准操作失败 ({e.message.splitlines()[0]})。启动B计划：JavaScript强制点击。")
-            try:
-                if interaction_type == 'click' or interaction_type == 'submit':
-                    # evaluate方法可以在元素上执行任意JS代码，element.click()可以无视可见性
-                    await locator.evaluate("element => element.click()")
-                elif interaction_type == 'input':
-                    # 对于输入，JS操作会更复杂，这里暂时只处理点击
-                    self.logger.error("JavaScript强制输入尚未实现。")
-                    raise e # 如果是input失败，则重新抛出原始异常
-            except Exception as js_e:
-                self.logger.error(f"JavaScript强制点击也失败了: {js_e}")
-                raise js_e # 抛出JS点击的异常
-        
-        # 在操作后短暂等待
-        await asyncio.sleep(0.5)
-
-    async def _run_full_analysis(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            return await asyncio.wait_for(
-                self._perform_targeted_analysis(page, snapshot, event),
-                timeout=self.analysis_timeout
-            )
-        except asyncio.TimeoutError:
-            self.logger.warning(f"交互分析超时（{self.analysis_timeout}秒），返回基础SAST结果")
-            return {'sast_findings': snapshot.get('sast_results', {}), 'llm_analysis': None}
-
-    async def _accumulate_and_report(self, event, snapshot, analysis_results):
-        new_findings = self._standardize_findings(event, snapshot, analysis_results)
-        self.cumulative_findings.extend(new_findings)
-        self.logger.info(f"累积了 {len(new_findings)} 个新发现，总计 {len(self.cumulative_findings)} 个发现")
-        current_time = event.get('timestamp', 0)
-        if current_time - self.last_report_time >= self.report_interval:
-            await self._output_cumulative_report()
-            self.last_report_time = current_time
-
-    def _standardize_findings(self, event, snapshot, results) -> list:
-        all_findings = []
-        if results.get('llm_analysis'):
-            llm_res = results['llm_analysis']
-            finding = {
-                'vulnerability': f"AI综合研判: {llm_res.get('risk_assessment')}",
-                'severity': llm_res.get('risk_assessment', 'Informational'),
-                'confidence': 'High',
-                'description': llm_res.get('analysis_summary', 'N/A'),
-                'recommendation': '\n'.join(llm_res.get('security_recommendations', [])),
-                'attack_vectors': '\n'.join(llm_res.get('potential_attack_vectors', [])),
-                'source': 'llm_analysis'
-            }
-            all_findings.append(finding)
-
-        dast_results = results.get('shadow_browser_test_results', {})
-        if dast_results and dast_results.get('security_findings'):
-            for finding in dast_results['security_findings']:
-                std_finding = {
-                    'vulnerability': finding.get('type', 'DAST Finding'),
-                    'severity': finding.get('severity', 'Medium'),
-                    'confidence': 'High',
-                    'description': finding.get('description'),
-                    'evidence': f"Payload: {finding.get('payload')}",
-                    'source': 'dast_shadow_browser'
-                }
-                all_findings.append(std_finding)
-        
-        js_crypto_analysis = results.get('js_crypto_analysis')
-        if js_crypto_analysis and js_crypto_analysis.get('findings'):
-            for finding in js_crypto_analysis['findings']:
-                std_finding = {
-                    'vulnerability': finding.get('type', 'JS/Crypto Issue'),
-                    'severity': finding.get('severity', 'Medium'),
-                    'confidence': 'Medium',
-                    'description': finding.get('description'),
-                    'evidence': finding.get('evidence'),
-                    'source': 'js_crypto_analysis'
-                }
-                all_findings.append(std_finding)
-
-        for finding in all_findings:
-            finding.update({
-                'url': event.get('url'),
-                'interaction_type': event.get('interaction_type', 'N/A'),
-                'element_selector': snapshot.get('target_element', {}).get('selector')
-            })
-        return all_findings
-
-    async def _output_cumulative_report(self):
-        if not self.cumulative_findings:
-            self.logger.info("暂无发现，跳过报告输出")
+        if not self.llm_client:
+            self.logger.warning("LLM客户端未初始化，跳过AI分析。")
             return
-        report_data = {
-            'worker': 'InteractionWorker-Cumulative',
-            'source_context': {
-                'initiator_url': self.target_url,
-                'mode': 'passive',
-                'total_interactions_analyzed': len(self.interaction_history)
-            },
-            'findings': self.cumulative_findings,
-            'timestamp': asyncio.get_event_loop().time()
-        }
-        await self.output_q.put(report_data)
-        self.logger.info(f"已输出包含 {len(self.cumulative_findings)} 个发现的累积报告。")
-        self.cumulative_findings = []
 
-    async def _create_interaction_snapshot(self, page: Page, event: Dict[str, Any]) -> Dict[str, Any]:
-        self.logger.info("创建交互点快照...")
-        page_content = await page.content()
-        sast_results = {
-            'secrets': secret_scanner.find_secrets(page_content),
-            'xss_sinks': xss_scanner.find_xss_sinks(page_content),
-            'crypto': crypto_detector.detect_crypto_patterns(page_content)
-        }
-        return {
-            "url": page.url,
-            "title": await page.title(),
-            "target_element": event.get('element_info', {}),
-            "sast_results": sast_results,
-            "interaction_type": event.get('interaction_type'),
-            "timestamp": event.get('timestamp')
-        }
-
-    async def _perform_targeted_analysis(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
-        analysis_results = {'sast_findings': snapshot['sast_results']}
-        if self.analysis_depth == 'deep':
-            self.iast_findings.clear()
-            results = await asyncio.gather(
-                self._analyze_js_and_crypto(page), # 移除冗余参数
-                self._run_shadow_browser_test(page, snapshot, event),
-                return_exceptions=True
-            )
-            analysis_results['js_crypto_analysis'] = results[0] if not isinstance(results[0], Exception) else None
-            analysis_results['shadow_browser_test_results'] = results[1] if not isinstance(results[1], Exception) else None
-            analysis_results['iast_findings'] = self.iast_findings.copy()
-            self.iast_findings.clear()
-        return analysis_results
-
-    async def _analyze_js_and_crypto(self, page: Page) -> Optional[Dict[str, Any]]: # 移除冗余参数
-        self.logger.info("开始主动分析JS加密函数...")
+        prompt = get_js_re_prompt(code_snippet, variables, url)
+        
         try:
-            crypto_info = await browser_tools.get_crypto_functions(page)
-            self.logger.info(f"JS加密分析完成。")
-            return json.loads(crypto_info)
-        except Exception as e:
-            self.logger.error(f"JS加密分析失败: {e}")
-            return None
-
-    async def _run_shadow_browser_test(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        findings = []
-        # This is a placeholder for the full DAST engine
-        # For now, we just run a simple SSTI check on input events
-        target_selector = snapshot.get('target_element', {}).get('selector')
-        if event.get('interaction_type') == 'input' and target_selector:
-            try:
-                ssti_payload = "{{7*7}}"
-                await page.fill(target_selector, ssti_payload, timeout=15000)
-                await page.press(target_selector, 'Enter')
-                await asyncio.sleep(1)
-                content = await page.content()
-                if "49" in content and ssti_payload not in content:
-                    findings.append({
-                        'type': 'SSTI',
-                        'severity': 'High',
-                        'description': 'Input field seems vulnerable to SSTI.',
-                        'payload': ssti_payload
-                    })
-            except Exception as e:
-                self.logger.warning(f"SSTI影人浏览器测试失败: {e}")
-        return {'security_findings': findings}
-
-    async def _test_url_params(self, url: str, auth_state: Optional[Dict]):
-        self.logger.info(f"开始对URL参数进行DAST测试: {url}")
-        try:
-            rules_file = os.path.join(os.path.dirname(__file__), '..', 'dast_payloads', 'url_param_tests.yaml')
-            if not os.path.exists(rules_file):
-                return
-
-            with open(rules_file, 'r', encoding='utf-8') as f:
-                rules = yaml.safe_load(f)
-
-            parsed_url = urlparse(url)
-            query_params = parse_qs(parsed_url.query)
-            
-            if not query_params:
-                return
-
-            async with self.concurrency_semaphore:
-                context = await self.browser_pool.acquire()
-                try:
-                    page = await context.new_page()
-                    if auth_state:
-                        await auth_tools.inject_auth_state(page, auth_state)
-
-                    for param_name, param_values in query_params.items():
-                        for rule in rules:
-                            if param_name in rule.get('params', []):
-                                self.logger.info(f"URL参数 '{param_name}' 匹配规则 '{rule.get('name')}'，准备测试...")
-                                await self._execute_param_test(page, url, param_name, rule)
-                finally:
-                    await self.browser_pool.release(context)
+            response_content = await self._call_llm(prompt)
+            if response_content:
+                # 直接打印AI的分析结果
+                self.logger.info(f"\n--- AI逆向分析结果 ---\nURL: {url}\n触发函数: {debug_event.get('function_name', 'anonymous')}\n{response_content}\n-----------------------")
 
         except Exception as e:
-            self.logger.error(f"URL参数分析失败: {e}", exc_info=True)
+            self.logger.error(f"调用LLM进行JS逆向分析时出错: {e}", exc_info=True)
 
-    async def _execute_param_test(self, page: Page, base_url: str, param_name: str, rule: Dict):
-        payload_file_path = os.path.join(os.path.dirname(__file__), '..', 'dast_payloads', rule['test_payload_file'])
-        if not os.path.exists(payload_file_path):
-            return
-
-        with open(payload_file_path, 'r', encoding='utf-8') as f:
-            payloads = yaml.safe_load(f)
-
-        for payload in payloads:
-            try:
-                parsed_url = urlparse(base_url)
-                query_params = parse_qs(parsed_url.query)
-                query_params[param_name] = [payload['value']]
-                
-                new_query = urlencode(query_params, doseq=True)
-                test_url = urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, parsed_url.params, new_query, parsed_url.fragment))
-                
-                self.logger.debug(f"测试URL: {test_url}")
-                await page.goto(test_url, wait_until='domcontentloaded')
-                content = await page.content()
-
-                if payload.get('expected') and payload['expected'] in content:
-                    finding = {
-                        'vulnerability': f"URL参数存在{payload.get('type', 'Vulnerability')}",
-                        'severity': 'High',
-                        'description': f"URL参数 '{param_name}' 在注入Payload '{payload['value']}' 后，响应中出现了预期结果 '{payload['expected']}'。",
-                        'evidence': f"URL: {test_url}",
-                        'source': 'dast_url_param_scan'
-                    }
-                    self.cumulative_findings.append(self._standardize_findings({}, {"target_element":{}}, {'llm_analysis':None, 'shadow_browser_test_results':{'security_findings':[finding]}})[0])
-                    self.logger.warning(f"高危发现: {finding['description']}")
-                    break
-
-            except Exception as e:
-                self.logger.warning(f"执行参数 '{param_name}' 的Payload '{payload.get('name')}' 测试失败: {e}")
-
-    async def _perform_llm_analysis(self, snapshot: Dict[str, Any], event: Dict[str, Any], results: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        try:
-            level = self.config.get('llm_service', {}).get('reasoning_level', 'high')
-            goal = "分析用户交互点的安全风险，提供针对性的安全建议"
-            
-            # 在这里加入诊断日志
-            self.logger.info(f"准备LLM分析，当前可用的情报键: {list(results.keys())}")
-
-            prompt = get_interaction_analysis_prompt(event.get('interaction_type'), snapshot, results, goal, level)
-            llm_result = await self._call_llm(prompt)
-            if 'error' in llm_result: return None
-            return json.loads(llm_result['response'])
-        except Exception as e:
-            self.logger.error(f"LLM分析失败: {e}")
-            return None
-
-    async def _call_llm(self, prompt: str) -> Dict[str, Any]:
-        if not self.llm_client: return {'error': 'LLM client not initialized'}
+    async def _call_llm(self, prompt: str) -> Optional[str]:
         try:
             cfg = self.config['llm_service']['api_config']
-            messages = [{"role": "system", "content": "你是一位网络安全专家，擅长分析网页交互中的安全风险。"}, {"role": "user", "content": prompt}]
-            response = await asyncio.wait_for(self.llm_client.chat.completions.create(model=cfg['model_name'], messages=messages, max_tokens=1500, temperature=0.5), timeout=cfg.get('timeout', 300))
+            messages = [{"role": "system", "content": "你是一名顶级的JavaScript逆向工程专家，尤其擅长分析和破解前端加密逻辑。"}, {"role": "user", "content": prompt}]
+            
+            response = await asyncio.wait_for(
+                self.llm_client.chat.completions.create(
+                    model=cfg['model_name'], 
+                    messages=messages, 
+                    max_tokens=2048, 
+                    temperature=0.3
+                ),
+                timeout=cfg.get('timeout', 180)
+            )
+            
             content = response.choices[0].message.content
             await log_ai_dialogue(prompt, content, self.config.get('logging', {}).get('ai_dialogues_file', './logs/ai_dialogues.jsonl'))
-            return {'response': content}
+            return content
+
+        except asyncio.TimeoutError:
+            self.logger.error("LLM调用超时。")
+            return "[分析超时]"
         except Exception as e:
             self.logger.error(f"LLM调用失败: {e}")
-            return {'error': str(e)}
+            return f"[分析失败: {e}]"
