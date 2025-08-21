@@ -155,14 +155,45 @@ class InteractionWorker:
         interaction_type = event.get('interaction_type')
         element_info = event.get('element_info', {})
         selector = element_info.get('selector')
+        text_content = element_info.get('text')
+
         if not selector:
             return
 
-        if interaction_type == 'click' or interaction_type == 'submit':
-            await page.click(selector, timeout=15000)
-        elif interaction_type == 'input':
-            await page.fill(selector, element_info.get('text', 'aegis_replay'), timeout=15000)
+        # --- 定位逻辑 ---
+        locator = page.locator(selector)
+        count = await locator.count()
+        if count > 1 and text_content:
+            self.logger.info(f"选择器 '{selector}' 匹配到 {count} 个元素，将使用文本 '{text_content}' 进行精确过滤。")
+            locator = locator.filter(has_text=text_content)
+            if await locator.count() > 1:
+                locator = locator.first
         
+        # --- 操作逻辑 ---
+        try:
+            # 步骤1: 尝试标准Playwright操作，它会进行可见性等严格检查
+            self.logger.info(f"尝试标准Playwright操作: {interaction_type}")
+            if interaction_type == 'click' or interaction_type == 'submit':
+                await locator.click(timeout=5000) # 缩短超时，快速失败
+            elif interaction_type == 'input':
+                await locator.fill(element_info.get('text', 'aegis_replay'), timeout=5000)
+
+        except PlaywrightError as e:
+            # 步骤2: 如果标准操作失败，启动B计划：JavaScript强制点击
+            self.logger.warning(f"标准操作失败 ({e.message.splitlines()[0]})。启动B计划：JavaScript强制点击。")
+            try:
+                if interaction_type == 'click' or interaction_type == 'submit':
+                    # evaluate方法可以在元素上执行任意JS代码，element.click()可以无视可见性
+                    await locator.evaluate("element => element.click()")
+                elif interaction_type == 'input':
+                    # 对于输入，JS操作会更复杂，这里暂时只处理点击
+                    self.logger.error("JavaScript强制输入尚未实现。")
+                    raise e # 如果是input失败，则重新抛出原始异常
+            except Exception as js_e:
+                self.logger.error(f"JavaScript强制点击也失败了: {js_e}")
+                raise js_e # 抛出JS点击的异常
+        
+        # 在操作后短暂等待
         await asyncio.sleep(0.5)
 
     async def _run_full_analysis(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
@@ -273,7 +304,7 @@ class InteractionWorker:
         if self.analysis_depth == 'deep':
             self.iast_findings.clear()
             results = await asyncio.gather(
-                self._analyze_js_and_crypto(page, snapshot, event),
+                self._analyze_js_and_crypto(page), # 移除冗余参数
                 self._run_shadow_browser_test(page, snapshot, event),
                 return_exceptions=True
             )
@@ -283,7 +314,7 @@ class InteractionWorker:
             self.iast_findings.clear()
         return analysis_results
 
-    async def _analyze_js_and_crypto(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def _analyze_js_and_crypto(self, page: Page) -> Optional[Dict[str, Any]]: # 移除冗余参数
         self.logger.info("开始主动分析JS加密函数...")
         try:
             crypto_info = await browser_tools.get_crypto_functions(page)
@@ -390,6 +421,10 @@ class InteractionWorker:
         try:
             level = self.config.get('llm_service', {}).get('reasoning_level', 'high')
             goal = "分析用户交互点的安全风险，提供针对性的安全建议"
+            
+            # 在这里加入诊断日志
+            self.logger.info(f"准备LLM分析，当前可用的情报键: {list(results.keys())}")
+
             prompt = get_interaction_analysis_prompt(event.get('interaction_type'), snapshot, results, goal, level)
             llm_result = await self._call_llm(prompt)
             if 'error' in llm_result: return None

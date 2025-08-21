@@ -161,6 +161,18 @@ class CDPController:
                         });
                     }
                 }, true);
+
+                // 新增：监听输入事件
+                document.addEventListener('change', (e) => {
+                    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) {
+                        window.onUserInteraction({
+                            type: 'input', // 事件类型定义为input
+                            selector: getCssSelector(e.target),
+                            tag: e.target.tagName,
+                            text: e.target.value // 记录输入框的最终值
+                        });
+                    }
+                }, true);
             })();""")
         except Exception as e:
             self.logger.error(f"为页面 {page.url} 设置监听器失败: {e}")

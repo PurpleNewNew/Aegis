@@ -74,15 +74,17 @@ class InvestigationManager:
             self.active_endpoints.remove(endpoint)
 
     async def run(self):
-        self.logger.info("调查任务管理器正在运行。")
+        self.logger.info("调查任务管理器正在运行（v4 - 混合触发模式）。")
         execution_mode = self.config.get('investigation_manager', {}).get('execution_mode', 'passive')
         self.logger.info(f"执行模式: {execution_mode}")
         
+        self.previous_interaction_url: str | None = None
+
         try:
             while True:
                 event = await self.input_q.get()
-                event_type = event.get('event_type', 'navigation')
-                
+                event_type = event.get('event_type')
+
                 if event_type == 'user_interaction' and execution_mode == 'passive':
                     await self._handle_user_interaction(event)
                 elif event_type == 'navigation':
@@ -99,19 +101,10 @@ class InvestigationManager:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*self.agent_tasks, return_exceptions=True)
-    
+
     def _is_commit_action(self, event: Dict[str, Any]) -> bool:
-        """判断一个交互是否是“提交性操作”。"""
-        interaction_type = event.get('interaction_type')
-        tag = event.get('element_info', {}).get('tag', '').upper()
-        
-        if interaction_type == 'submit':
-            return True
-        if interaction_type == 'click' and tag in ['BUTTON', 'A']:
-             # 简单起见，我们假设所有按钮和链接点击都是提交性操作
-             # 未来可以根据按钮文本（如Save, Submit, Login）进行更精细的判断
-            return True
-        return False
+        """一个操作是否是“提交性”的，即是否触发了网络请求。"""
+        return event.get('triggers_network_request', False)
 
     async def _handle_user_interaction(self, event: dict):
         """处理用户交互事件，实现交互链聚合与调度。"""
@@ -119,8 +112,9 @@ class InvestigationManager:
         if not url:
             return
 
-        # 将当前事件追加到对应URL的操作链中
+        # 记录交互事件，并更新最近交互的URL
         self.interaction_chains[url].append(event)
+        self.previous_interaction_url = url
         self.logger.info(f"记录交互事件: {event.get('interaction_type')} on {url}。当前链长度: {len(self.interaction_chains[url])}")
 
         # 检查当前事件是否为“提交性操作”
@@ -128,16 +122,21 @@ class InvestigationManager:
             chain_to_analyze = self.interaction_chains[url][:]
             self.logger.info(f"检测到提交性操作，派发包含 {len(chain_to_analyze)} 个事件的分析任务...")
             
-            # 派发任务进行分析
+            # 派发任务进行分析，但不再清除交互链
             asyncio.create_task(self.interaction_worker.analyze_interaction_chain(chain_to_analyze))
-            
-            # 清空当前URL的操作链，为下一次逻辑操作做准备
-            self.interaction_chains[url].clear()
 
     async def _handle_navigation_event(self, nav_info: dict):
         """
-        处理导航事件，根据是否为新端点来决定分析策略。
+        处理导航事件。导航事件也负责清理上一页的交互链。
         """
+        # 步骤1: 清理上一个页面的交互链
+        if self.previous_interaction_url:
+            if self.previous_interaction_url in self.interaction_chains:
+                self.logger.info(f"导航发生，清理URL '{self.previous_interaction_url}' 的交互链。")
+                self.interaction_chains[self.previous_interaction_url].clear()
+            self.previous_interaction_url = None
+
+        # 步骤2: 正常处理新的导航事件
         full_url = nav_info.get('url')
         endpoint = nav_info.get('endpoint')
         is_new_endpoint = nav_info.get('is_new_endpoint', False)

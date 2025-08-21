@@ -32,7 +32,7 @@ browser_pool:
 scanner_scope:
   # 重要：只有在此列表中的域名/IP才会被分析。
   # 支持主域名匹配，如填写 "ctf.show" 可匹配所有 "*.ctf.show" 子域名
-  whitelist_domains: ["ctf.show","121.43.58.124"]
+  whitelist_domains: ["ctf.show","121.43.58.124","127.0.0.1"]
 
 llm_service:
   # =================================================================
