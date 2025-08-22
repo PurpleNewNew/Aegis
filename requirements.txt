@@ -1,6 +1,5 @@
 playwright
 openai
 PyYAML
-chromadb
 aiofiles
 httpx

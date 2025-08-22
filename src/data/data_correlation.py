@@ -429,12 +429,10 @@ class DataCorrelationManager:
         # 获取完整的网络数据
         network_data = []
         network_items = session.get_data_by_type('network_request') + session.get_data_by_type('network_response')
-        for item in network_items:
-            if 'data_id' in item.data:
-                # 从DataHub获取完整数据
-                full_data = self.data_hub.get_data_by_id(item.data['data_id'])
-                if full_data:
-                    network_data.append(full_data)
+        network_data_ids = [item.data['data_id'] for item in network_items if 'data_id' in item.data]
+        if network_data_ids:
+            # 从DataHub获取完整数据
+            network_data = self.data_hub.get_network_data_by_ids(network_data_ids)
         
         if network_data:
             context['network_data'] = network_data
@@ -442,11 +440,9 @@ class DataCorrelationManager:
         # 获取JS钩子事件
         js_events = []
         js_items = session.get_data_by_type('js_hook_event')
-        for item in js_items:
-            if 'data_id' in item.data:
-                full_event = self.data_hub.get_data_by_id(item.data['data_id'])
-                if full_event:
-                    js_events.append(full_event)
+        js_event_ids = [item.data['data_id'] for item in js_items if 'data_id' in item.data]
+        if js_event_ids:
+            js_events = self.data_hub.get_js_hook_events_by_ids(js_event_ids)
                     
         if js_events:
             context['js_events'] = js_events
@@ -454,11 +450,9 @@ class DataCorrelationManager:
         # 获取AI分析结果
         ai_results = []
         ai_items = session.get_data_by_type('ai_analysis')
-        for item in ai_items:
-            if 'data_id' in item.data:
-                full_analysis = self.data_hub.get_data_by_id(item.data['data_id'])
-                if full_analysis:
-                    ai_results.append(full_analysis)
+        ai_result_ids = [item.data['data_id'] for item in ai_items if 'data_id' in item.data]
+        if ai_result_ids:
+            ai_results = self.data_hub.get_ai_analysis_by_ids(ai_result_ids)
                     
         if ai_results:
             context['ai_analysis'] = ai_results

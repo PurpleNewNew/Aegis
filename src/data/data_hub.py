@@ -26,13 +26,15 @@ class DataHub:
         self.data_store: Dict[str, List[Dict]] = {
             'network_data': [],
             'cdp_events': [],
-            'js_hook_events': []
+            'js_hook_events': [],
+            'ai_analysis': []
         }
         # 数据订阅者
         self.subscribers: Dict[str, List[Callable]] = {
             'network_data': [],
             'cdp_events': [],
-            'js_hook_events': []
+            'js_hook_events': [],
+            'ai_analysis': []
         }
         # 数据清理配置
         self.max_data_age_seconds = 3600  # 默认保留1小时数据
@@ -161,6 +163,28 @@ class DataHub:
             return []
         return [item for item in self.data_store.get('cdp_events', []) 
                 if item.get('id') in ids]
+    
+    def get_ai_analysis_by_ids(self, ids: List[str]) -> List[Dict]:
+        """
+        根据ID列表获取AI分析结果
+        
+        Args:
+            ids: 数据ID列表
+            
+        Returns:
+            List[Dict]: 匹配的AI分析结果
+        """
+        # 注意：AI分析结果可能存储在不同的数据类型中，这里假设存储在'ai_analysis'类型中
+        # 如果实际存储类型不同，需要相应修改
+        if not ids:
+            return []
+        # 检查是否存在专门的ai_analysis存储类型
+        if 'ai_analysis' in self.data_store:
+            return [item for item in self.data_store.get('ai_analysis', []) 
+                    if item.get('id') in ids]
+        # 如果没有专门的存储类型，可能需要在其他类型中查找
+        # 这里返回空列表，需要根据实际情况调整
+        return []
 
     def clear_data(self, data_type: str = None):
         if data_type:

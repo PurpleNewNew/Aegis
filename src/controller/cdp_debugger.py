@@ -117,8 +117,34 @@ class CDPDebugger:
         page_id = id(page)
         session_id = self.page_to_session_id.get(page_id)
         if not session_id or not self._is_in_whitelist(page.url):
-            await session.send('Debugger.resume')
+            try:
+                await session.send('Debugger.resume')
+            except Exception:
+                pass
             return
+
+        # 核心修改：通过暂停原因来判断是否需要“步入”
+        pause_reason = event.get('reason')
+        self.logger.debug(f"Debugger paused on {page.url}. Reason: {pause_reason}.")
+
+        # 如果是由事件监听器触发的初始暂停，我们应该步入到函数内部，而不是立即分析
+        if pause_reason == 'EventListener':
+            event_name = event.get('data', {}).get('eventName')
+            self.logger.info(f"Event '{event_name}' triggered. Stepping into the handler to find the real code...")
+            try:
+                # 执行步入操作，这将导致调试器在函数内部再次暂停
+                await session.send('Debugger.stepInto')
+            except Exception as e:
+                self.logger.error(f"Failed to step into debugger for event '{event_name}': {e}. Resuming.", exc_info=True)
+                try:
+                    await session.send('Debugger.resume')
+                except Exception:
+                    pass
+            return  # 等待下一次'step'触发的paused事件
+
+        # 对于所有其他原因的暂停（最重要的是'step'），我们才执行详细的分析
+        # 这意味着我们现在处于函数内部，可以抓取到有价值的代码
+        self.logger.debug(f"Now inside the function call. Processing paused event...")
         asyncio.create_task(self._process_paused_event(event, session, page, session_id))
 
     async def _process_paused_event(self, event: Dict[str, Any], session: CDPSession, page: Page, session_id: str):

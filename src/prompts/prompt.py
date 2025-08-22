@@ -2,7 +2,7 @@ import json
 import re
 from typing import List, Dict, Any
 
-def get_js_re_prompt(code_snippet: str, variables: Dict[str, Any], url: str, network_data: List[Dict] = None, js_hook_events: List[Dict] = None, analysis_context: Dict = None) -> str:
+def get_js_re_prompt(code_snippet: str, variables: Dict[str, Any], url: str, network_data: List[Dict] = None, js_hook_events: List[Dict] = None, analysis_context: Dict = None, call_stack: List[str] = None) -> str:
     """
     构建一个专门用于JS逆向工程分析的提示词。
     
@@ -19,6 +19,12 @@ def get_js_re_prompt(code_snippet: str, variables: Dict[str, Any], url: str, net
     for name, value in variables.items():
         variable_list.append(f"- `{name}`: `{value}`")
     variables_str = "\n".join(variable_list) if variable_list else "无"
+
+    call_stack_info = ""
+    if call_stack:
+        # 反转调用栈，使其更符合人类阅读直觉（从外部事件到内部函数）
+        reversed_stack = " -> ".join(reversed(call_stack))
+        call_stack_info = f"\n**函数调用路径**\n`{reversed_stack}`\n"
 
     network_info = ""
     if network_data:
@@ -88,9 +94,9 @@ def get_js_re_prompt(code_snippet: str, variables: Dict[str, Any], url: str, net
             function_name = event.get('functionName', '')
             
             # 检查是否是加密相关事件
-            if any(keyword in function_name.lower() for keyword in ['encrypt', 'decrypt', 'hash', 'sign', 'aes', 'rsa', 'md5', 'sha']):
+            if any(keyword in function_name.lower() for keyword in ['encrypt', 'decrypt', 'hash', 'sign', 'aes', 'rsa', 'md5', 'sha', 'cipher', 'hmac', 'pbkdf2', 'scrypt', 'bcrypt']):
                 crypto_events.append(event)
-            elif event_type in ['function_call', 'function_return'] and any(keyword in function_name.lower() for keyword in ['crypto', 'key', 'token']):
+            elif event_type in ['function_call', 'function_return'] and any(keyword in function_name.lower() for keyword in ['crypto', 'key', 'token', 'encode', 'decode', 'obfuscate', 'obfuscation']):
                 crypto_events.append(event)
         
         if crypto_events:

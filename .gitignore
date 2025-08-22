@@ -1,6 +1,5 @@
 /tmp_prompts/
 __pycache__/
-chroma_db/
 logs/
 reports/
 Gemini.md

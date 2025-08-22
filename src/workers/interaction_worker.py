@@ -124,6 +124,7 @@ class InteractionWorker:
         url = debug_event.get('url')
         code_snippet = debug_event.get('code_snippet')
         variables = debug_event.get('variables')
+        call_stack = debug_event.get('call_stack', [])
         full_context = debug_event.get('full_context', {})
 
         if not session_id:
@@ -153,7 +154,7 @@ class InteractionWorker:
             return
 
         # 4. 调用AI
-        prompt = get_js_re_prompt(code_snippet, variables, url, network_data, js_hook_events, full_context)
+        prompt = get_js_re_prompt(code_snippet, variables, url, network_data, js_hook_events, full_context, call_stack)
         try:
             response_content = await self._call_llm(prompt)
             if response_content:

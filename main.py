@@ -7,9 +7,6 @@ from playwright.async_api import async_playwright
 # 导入队列管理器
 from src.queues.queue_manager import QueueManager, QueueType
 
-# 禁用ChromaDB遥测功能
-os.environ['ANONYMIZED_TELEMETRY'] = 'False'
-
 # 配置基础日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 

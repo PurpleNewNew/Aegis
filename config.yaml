@@ -50,40 +50,6 @@ llm_service:
     api_key: "lm-studio"
     timeout: 500 # 20B模型可能需要较长推理时间，保持500秒超时
 
-chromadb:
-  # 存储向量数据库文件的路径。
-  path: "./chroma_db"
-  collection_name: "aegis_memories"
-
-investigation_manager:
-  # 执行模式选择：'autonomous'（自主决策）或 'passive'（无感被动）
-  execution_mode: 'passive'
-  # ----------------------------------------------------------------
-  # 🤔 如何选择？
-  # ----------------------------------------------------------------
-  # • 完全自动化测试 → autonomous
-  # • 仅在用户交互时分析 → passive （推荐用于无感被动模式）
-  
-  # 被动模式配置
-  passive_mode:
-    # 是否启用交互事件监听
-    enable_interaction_monitoring: true
-    # 交互分析深度：'basic'（基础分析）或 'deep'（深度分析）
-    analysis_depth: 'deep'
-    # 是否在交互时自动执行安全测试
-    auto_security_testing: true
-    # 交互类型过滤（只分析指定类型的交互）
-    # 可选值：'click', 'submit', 'input', 'navigation'
-    interaction_types: ['click', 'submit', 'input']
-    # 分析超时时间（秒）
-    analysis_timeout: 360
-    # 是否生成交互分析报告
-    generate_interaction_reports: true
-
-reporter:
-  # 保存分析报告的目录。
-  output_dir: "./reports"
-
 logging:
   # 用于存储与AI完整对话以供调试的文件。
   ai_dialogues_file: "./logs/ai_dialogues.jsonl"
