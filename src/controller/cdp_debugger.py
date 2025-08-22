@@ -3,22 +3,17 @@ import logging
 import json
 import time
 import base64
-from asyncio import Queue
-from typing import Any, Dict, Optional, List
+from asyncio import Queue, Future
+from typing import Any, Dict, Optional, List, Set
 from urllib.parse import urlparse
 from playwright.async_api import Page, CDPSession, Browser, Request, Response
 
 from src.data.data_correlation import get_correlation_manager
 from src.network.network_manager import get_network_manager, NetworkEvent, NetworkEventType
 
-# 常量定义
-DEFAULT_MAX_NETWORK_DATA_PER_PAGE = 500
-DEFAULT_REQUEST_RETRY_ATTEMPTS = 3
-DEFAULT_REQUEST_RETRY_DELAY = 1000
-
 class CDPDebugger:
     """
-    (最终重构版)
+    (最终稳定版)
     """
 
     def __init__(self, output_q: Queue, network_data_q: Queue, config: dict, interaction_worker=None):
@@ -30,12 +25,12 @@ class CDPDebugger:
         self.logger = logging.getLogger(self.__class__.__name__)
         self.interaction_worker = interaction_worker
         self.data_correlation = get_correlation_manager(config)
+        
+        # --- 会话与脚本管理 ---
         self.cdp_sessions: Dict[int, CDPSession] = {}
         self.page_to_session_id: Dict[int, str] = {}
-        self.request_retry_attempts = config.get('network', {}).get(
-            'retry_attempts', DEFAULT_REQUEST_RETRY_ATTEMPTS)
-        self.request_retry_delay = config.get('network', {}).get(
-            'retry_delay', DEFAULT_REQUEST_RETRY_DELAY)
+        self.parsed_scripts: Set[str] = set() # 存放所有已解析的scriptId
+        self.script_parse_futures: Dict[str, Future] = {} # 存放等待解析的Future
 
     def _is_in_whitelist(self, url: str) -> bool:
         if not url or not url.startswith(('http://', 'https://')):
@@ -90,57 +85,83 @@ class CDPDebugger:
         except Exception as e:
             self.logger.error(f"处理网络响应事件时出错: {e}", exc_info=True)
 
+    def _on_script_parsed(self, event: Dict[str, Any]):
+        script_id = event.get('scriptId')
+        if script_id:
+            self.parsed_scripts.add(script_id)
+            # 如果有正在等待这个脚本的Future，则通知它
+            if script_id in self.script_parse_futures:
+                if not self.script_parse_futures[script_id].done():
+                    self.script_parse_futures[script_id].set_result(True)
+                del self.script_parse_futures[script_id]
+
+    async def _wait_for_script_parsed(self, script_id: str, timeout: float = 1.0) -> bool:
+        if script_id in self.parsed_scripts:
+            return True
+        
+        # 创建一个Future来等待事件
+        future = asyncio.get_event_loop().create_future()
+        self.script_parse_futures[script_id] = future
+        
+        try:
+            await asyncio.wait_for(future, timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            self.logger.warning(f"等待脚本 {script_id} 解析超时。")
+            return False
+        finally:
+            if script_id in self.script_parse_futures:
+                del self.script_parse_futures[script_id]
+
     async def _on_paused(self, event: Dict[str, Any], session: CDPSession, page: Page):
         page_id = id(page)
         session_id = self.page_to_session_id.get(page_id)
         if not session_id or not self._is_in_whitelist(page.url):
             await session.send('Debugger.resume')
             return
-        # 异步执行，避免阻塞CDP的其他事件处理
         asyncio.create_task(self._process_paused_event(event, session, page, session_id))
 
     async def _process_paused_event(self, event: Dict[str, Any], session: CDPSession, page: Page, session_id: str):
         try:
-            # 1. 提取代码和变量
-            code_snippet = 'Source not available'
-            variables = {}
-            target_frame = None
+            code_snippet, variables, target_frame, call_stack_summary = 'Source not available', {}, None, []
             call_frames = event.get('callFrames', [])
-            function_name = 'anonymous'
-            call_stack_summary = []
 
             if call_frames:
-                # 准备调用栈摘要
                 call_stack_summary = [frame.get('functionName', 'anonymous') for frame in call_frames[:5]]
-                # 遍历调用栈查找源码
                 for frame in call_frames:
                     location = frame.get('location', {})
                     script_id = location.get('scriptId')
                     if not script_id:
                         continue
+                    
+                    if not await self._wait_for_script_parsed(script_id):
+                        continue
+
                     try:
                         source_response = await session.send('Debugger.getScriptSource', {'scriptId': script_id})
                         script_source = source_response.get('scriptSource', '')
-                        if script_source and not script_source.startswith('// Aegis internal'):
-                            line_number = location.get('lineNumber', 0)
+                        if script_source:
                             lines = script_source.splitlines()
-                            start_line = max(0, line_number - 20)
-                            end_line = min(len(lines), line_number + 40)
-                            snippet_lines = [f"{start_line + i + 1:4d}{'  >> ' if start_line + i == line_number else '     '}{line}" for i, line in enumerate(lines[start_line:end_line])]
-                            code_snippet = "\n".join(snippet_lines)
+                            # 加固逻辑：如果分割后行数为0或1，直接使用整个源码
+                            if len(lines) <= 1:
+                                code_snippet = script_source
+                            else:
+                                line_number = location.get('lineNumber', 0)
+                                start_line = max(0, line_number - 20)
+                                end_line = min(len(lines), line_number + 40)
+                                snippet_lines = [f"{start_line + i + 1:4d}{'  >> ' if start_line + i == line_number else '     '}{line}" for i, line in enumerate(lines[start_line:end_line])]
+                                code_snippet = "\n".join(snippet_lines)
+                            
                             target_frame = frame
-                            function_name = frame.get('functionName', 'anonymous')
-                            self.logger.info(f"成功从调用栈第 {call_frames.index(frame)} 帧获取到源码: {function_name}")
+                            self.logger.info(f"成功从已解析的脚本 {script_id} 中获取源码。")
                             break
-                    except Exception:
+                    except Exception as e:
+                        self.logger.warning(f"获取源码失败 (ScriptID: {script_id}): {e}")
                         continue
                 
-                # 如果循环结束仍未找到源码，则使用顶层帧作为目标
                 if not target_frame:
                     target_frame = call_frames[0]
-                    function_name = target_frame.get('functionName', 'anonymous')
 
-                # 从目标帧提取变量
                 for scope in target_frame.get('scopeChain', []):
                     if scope.get('type') in ['local', 'closure'] and scope.get('object', {}).get('objectId'):
                         properties_response = await session.send('Runtime.getProperties', {'objectId': scope['object']['objectId']})
@@ -148,36 +169,28 @@ class CDPDebugger:
                             if prop.get('value') and prop.get('value').get('type') not in ['function', 'undefined']:
                                 variables[prop['name']] = str(prop.get('value').get('value', ''))[:150]
 
-            # 2. 等待信息沉淀
-            self.logger.info(f"断点已捕获，等待 {self.config.get('analysis_delay', 0.5)}秒 以整合上下文信息...")
-            await asyncio.sleep(self.config.get('analysis_delay', 0.5))
-
-            # 3. 统一打包
+            await asyncio.sleep(self.config.get('analysis_delay', 2))
             full_context = self.data_correlation.generate_analysis_context(session_id)
             
+            # 增强日志
+            snippet_len = len(code_snippet) if code_snippet != 'Source not available' else 0
+            self.logger.info(f"信息整合完毕，准备发送情报包 (代码片段长度: {snippet_len}) (会话: {session_id})")
+
             debug_event = {
-                'type': 'cdp_event',
-                'timestamp': time.time(),
-                'url': page.url,
-                'session_id': session_id,
+                'type': 'cdp_event', 'timestamp': time.time(), 'url': page.url, 'session_id': session_id,
                 'trigger': event.get('data', {}).get('eventName', 'debugger_pause'),
-                'function_name': function_name,
-                'code_snippet': code_snippet,
-                'variables': variables,
-                'call_stack': call_stack_summary,
+                'function_name': target_frame.get('functionName', 'anonymous') if target_frame else 'anonymous',
+                'code_snippet': code_snippet, 'variables': variables, 'call_stack': call_stack_summary,
                 'full_context': full_context
             }
             
-            self.logger.info(f"信息整合完毕，发送完整情报包到分析器 (会话: {session_id})")
             await self.output_q.put(debug_event)
 
         except Exception as e:
             self.logger.error(f"处理CDP暂停事件时出错: {e}", exc_info=True)
         finally:
-            try:
-                await session.send('Debugger.resume')
-            except Exception:
-                pass
+            try: await session.send('Debugger.resume')
+            except Exception: pass
 
     async def setup_debugger_for_page(self, page: Page):
         page_id = id(page)
@@ -200,16 +213,16 @@ class CDPDebugger:
             page.on("close", lambda: asyncio.create_task(self._cleanup_page_data(page)))
             
             session.on('Debugger.paused', lambda event: self._on_paused(event, session, page))
+            session.on('Debugger.scriptParsed', self._on_script_parsed) # 监听脚本解析事件
+
             await session.send('Debugger.enable')
             await page.wait_for_load_state('networkidle', timeout=30000)
             self.logger.info(f"页面 {page.url} (会话: {session_id}) 已完全加载，设置断点中...")
             await session.send('Network.enable')
             
             for event_name in ['click', 'submit', 'input', 'change', 'keydown', 'mouseover', 'focus']:
-                try:
-                    await session.send('DOMDebugger.setEventListenerBreakpoint', {'eventName': event_name})
-                except Exception as e:
-                    self.logger.warning(f"设置 {event_name} 事件断点失败: {e}")
+                try: await session.send('DOMDebugger.setEventListenerBreakpoint', {'eventName': event_name})
+                except Exception as e: self.logger.warning(f"设置 {event_name} 事件断点失败: {e}")
             
             self.logger.info(f"CDP调试器已在页面 {page.url} (会话: {session_id}) 上激活。")
         except Exception as e:
@@ -217,7 +230,7 @@ class CDPDebugger:
             await self._cleanup_page_data(page)
 
     async def run(self, browser: Browser):
-        self.logger.info("CDP调试器(最终版)正在启动并接管浏览器...")
+        self.logger.info("CDP调试器(最终稳定版)正在启动并接管浏览器...")
         try:
             if not browser.is_connected():
                 self.logger.error("浏览器实例未连接，启动失败。")
@@ -237,7 +250,7 @@ class CDPDebugger:
             self.logger.info("CDP调试器现在将监控所有白名单页面的创建和关键事件。")
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            self.logger.info("CDP调试器收到关闭信号。")
+            self.logger.info("CDP调试器收到关闭信号。" )
         except Exception as e:
             self.logger.error(f"CDP调试器发生意外错误: {e}", exc_info=True)
         finally:
