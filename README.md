@@ -1,6 +1,8 @@
-# Aegis: AI-Powered JavaScript Reverse Engineering Assistant
+# AJS: AI-Powered JavaScript Reverse Engineering Assistant
 
-**Aegis** is a specialized tool designed to assist security researchers and developers in understanding and reverse-engineering complex, obfuscated front-end JavaScript, with a primary focus on cryptographic functions.
+WARNING！！！LOTS OF VIBE CODING！！
+
+**AJS** is a specialized tool designed to assist security researchers and developers in understanding and reverse-engineering complex, obfuscated front-end JavaScript, with a primary focus on cryptographic functions.
 
 It leverages the Chrome DevTools Protocol (CDP) and Large Language Models (LLMs) to turn the tedious process of manual debugging and code analysis into a fast, AI-driven query.
 
@@ -8,7 +10,7 @@ It leverages the Chrome DevTools Protocol (CDP) and Large Language Models (LLMs)
 
 The tool's architecture is simple and powerful:
 
-1.  **Live Debugging**: Aegis connects to your running Chrome browser instance. Its `CDPDebugger` component sets dynamic breakpoints on key user interaction events (`click`, `submit`, `change`).
+1.  **Live Debugging**: AJS connects to your running Chrome browser instance. Its `CDPDebugger` component sets dynamic breakpoints on key user interaction events (`click`, `submit`, `change`).
 
 2.  **Contextual Snippet Extraction**: When you perform an action on a web page (e.g., clicking a "Login" button that triggers encryption), the debugger catches the event. Instead of dumping the entire script, it intelligently extracts a small, relevant snippet of the JavaScript code around the breakpoint, along with the values of local variables at that exact moment.
 
@@ -34,7 +36,7 @@ pip install -r requirements.txt
 ```
 
 ### 2. Launch Chrome with Remote Debugging
-For Aegis to connect, you must start Chrome with a remote debugging port enabled. First, close all existing Chrome instances. Then, run the appropriate command for your OS:
+For AJS to connect, you must start Chrome with a remote debugging port enabled. First, close all existing Chrome instances. Then, run the appropriate command for your OS:
 
 **Windows**
 ```bash
@@ -51,14 +53,14 @@ For Aegis to connect, you must start Chrome with a remote debugging port enabled
 google-chrome --remote-debugging-port=9222
 ```
 
-### 3. Configure Aegis
+### 3. Configure AJS
 Edit the `config.yaml` file:
 - **`whitelist_domains`**: **(IMPORTANT)** Add the domains you intend to analyze (e.g., `example.com`, `localhost`). This is a crucial security measure.
 - **`llm_service.api_config`**: Configure the `base_url`, `model_name`, and `api_key` for your chosen LLM service.
 
-### 4. Run Aegis
+### 4. Run AJS
 ```bash
 python main.py
 ```
 
-Once running, simply use your main Chrome browser. Navigate to the whitelisted page you want to analyze. Perform an action that you suspect triggers encryption (like clicking a login or submit button). Watch the console where you ran Aegis. The AI's reverse engineering analysis will be printed there shortly after the event is triggered.
+Once running, simply use your main Chrome browser. Navigate to the whitelisted page you want to analyze. Perform an action that you suspect triggers encryption (like clicking a login or submit button). Watch the console where you ran AJS. The AI's reverse engineering analysis will be printed there shortly after the event is triggered.
