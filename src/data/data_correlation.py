@@ -176,15 +176,25 @@ class DataCorrelationManager:
         Returns:
             bool: 关联成功返回True，失败返回False
         """
+        # 首先检查活跃会话
         session = self.active_sessions.get(session_id)
+        
+        # 如果在活跃会话中找不到，也检查已完成的会话（可能刚刚完成）
         if not session:
+            session = self.completed_sessions.get(session_id)
+        
+        if not session:
+            # 尝试从所有会话中查找，包括可能被清理但仍被引用的会话
             self.logger.warning(f"尝试关联数据到不存在的会话: {session_id}")
+            self.logger.debug(f"当前活跃会话数: {len(self.active_sessions)}, 已完成会话数: {len(self.completed_sessions)}")
             return False
         
+        # 检查会话状态
         if session.status != SessionStatus.ACTIVE:
+            # 对于非活跃会话，记录警告但仍然尝试关联数据
             self.logger.warning(f"尝试关联数据到非活跃会话: {session_id}, 状态: {session.status}")
-            return False
-        
+            # 如果会话已完成或超时，我们仍然关联数据以保留完整性
+            
         # 添加关联数据引用（不存储完整数据）
         # 只存储数据ID或关键标识，实际数据从DataHub获取
         data_ref = {
@@ -193,46 +203,64 @@ class DataCorrelationManager:
             'timestamp': data.get('timestamp', time.time())
         }
         
-        correlated_item = session.add_correlated_data(data_type, data_ref)
-        self.stats['data_correlated'] += 1
-        
-        self.logger.debug(f"数据关联成功: {session_id}, 类型: {data_type}, 序列ID: {correlated_item.sequence_id}")
-        return True
+        try:
+            correlated_item = session.add_correlated_data(data_type, data_ref)
+            self.stats['data_correlated'] += 1
+            
+            self.logger.debug(f"数据关联成功: {session_id}, 类型: {data_type}, 序列ID: {correlated_item.sequence_id}")
+            return True
+        except Exception as e:
+            self.logger.error(f"关联数据到会话 {session_id} 时出错: {e}")
+            return False
     
     def get_session(self, session_id: str) -> Optional[AnalysisSession]:
         """获取会话"""
         session = self.active_sessions.get(session_id) or self.completed_sessions.get(session_id)
         return session
     
-    def get_or_create_session(self, page_url: str, trigger_event: Optional[Dict[str, Any]] = None) -> str:
+    def find_session_by_url(self, page_url: str) -> Optional[str]:
         """
-        获取或创建会话ID
+        根据URL查找一个最合适的现有会话ID。
+        只查找，不创建。
         
         Args:
-            page_url: 页面URL，用于标识会话
-            trigger_event: 触发事件，用于创建新会话
+            page_url: 页面URL
             
         Returns:
-            str: 会话ID
+            Optional[str]: 找到的会话ID，否则返回None
         """
-        # 首先尝试查找现有的活跃会话
+        # 首先尝试完全匹配
         for session_id, session in self.active_sessions.items():
             if session.trigger_event and session.trigger_event.get('url') == page_url:
-                # 如果会话未过期，返回现有会话ID
                 if not session.is_expired():
                     return session_id
         
-        # 如果没有找到合适的活跃会话，创建新会话
-        if trigger_event is None:
-            # 创建一个基本的触发事件
-            trigger_event = {
-                'url': page_url,
-                'trigger': 'auto_created',
-                'timestamp': time.time()
-            }
-        
-        session_id = self.create_session(trigger_event)
-        return session_id
+        # 如果完全匹配失败，尝试匹配域名（适用于URL变化但域名不变的场景）
+        try:
+            from urllib.parse import urlparse
+            target_hostname = urlparse(page_url).hostname
+            if not target_hostname:
+                return None
+            
+            # 查找相同域名下最近活动的会话
+            candidate_sessions = []
+            for session_id, session in self.active_sessions.items():
+                session_url = session.trigger_event.get('url')
+                if session_url and urlparse(session_url).hostname == target_hostname:
+                    candidate_sessions.append(session)
+            
+            if candidate_sessions:
+                # 返回最近活动的那个会话
+                latest_session = max(candidate_sessions, key=lambda s: s.last_activity)
+                if not latest_session.is_expired():
+                    return latest_session.session_id
+
+        except ImportError:
+            pass # 无法导入urlparse，跳过
+        except Exception as e:
+            self.logger.error(f"通过URL查找会话时出错: {e}")
+
+        return None
         
     def get_active_session(self, session_id: str) -> Optional[AnalysisSession]:
         """获取活跃会话"""

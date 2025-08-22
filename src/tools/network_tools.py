@@ -6,6 +6,9 @@ from playwright.async_api import Page, Request, Response
 import asyncio
 import logging
 
+from src.data.data_correlation import get_correlation_manager
+from src.network.network_manager import get_network_manager, NetworkEvent, NetworkEventType
+
 logger = logging.getLogger(__name__)
 
 
@@ -272,6 +275,20 @@ class NetworkSniffer:
     
         if should_store:
             self.captured_requests.append(request_data)
+            
+            # 使用网络数据管理器处理请求
+            network_manager = get_network_manager()
+            event = NetworkEvent(
+                event_type=NetworkEventType.REQUEST,
+                url=request.url,
+                method=request.method,
+                headers=dict(request.headers),
+                timestamp=datetime.now().timestamp(),
+                session_id=None,  # 可以根据需要添加session_id
+                content=request.post_data
+            )
+            
+            network_manager.process_network_event(event)
     
         logger.debug(f"捕获到请求: {request.method} {request.url}")
 
@@ -316,6 +333,21 @@ class NetworkSniffer:
                     logger.debug(f"获取响应体失败: {e}")
 
                 captured["response"] = response_data
+                
+                # 使用网络数据管理器处理响应
+                network_manager = get_network_manager()
+                event = NetworkEvent(
+                    event_type=NetworkEventType.RESPONSE,
+                    url=response.url,
+                    status=response.status,
+                    status_text=response.status_text,
+                    headers=dict(response.headers),
+                    timestamp=datetime.now().timestamp(),
+                    session_id=None  # 可以根据需要添加session_id
+                )
+                
+                network_manager.process_network_event(event)
+                
                 break
 
     async def start_capture(self, page: Page):
