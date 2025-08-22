@@ -295,6 +295,14 @@ class CDPDebugger:
             await page.wait_for_load_state('networkidle', timeout=30000)
             self.logger.info(f"页面 {page.url} 已完全加载(networkidle)，开始设置事件断点。")
 
+            # 启用网络监控而不是尝试拦截特定资源类型
+            try:
+                await session.send('Network.enable')
+                self.logger.info("网络监控已启用")
+            except Exception as e:
+                self.logger.warning(f"启用网络监控失败: {e}")
+            
+            # 设置事件断点（这部分是正确的）
             event_breakpoints = ['click', 'submit', 'input', 'change', 'keydown', 'mouseover', 'focus']
             for event_name in event_breakpoints:
                 try:
@@ -302,18 +310,19 @@ class CDPDebugger:
                 except Exception as e:
                     self.logger.warning(f"设置 {event_name} 事件断点失败: {e}")
 
-            # 添加额外资源类型监听
-            resource_types = ['script', 'xhr', 'fetch', 'websocket']
-            for resource_type in resource_types:
-                try:
-                    await session.send('Network.setRequestInterception', {
-                        'patterns': [{
-                            'resourceType': resource_type,
-                            'interceptionStage': 'Request'
-                        }]
-                    })
-                except Exception as e:
-                    self.logger.warning(f"设置 {resource_type} 资源拦截失败: {e}")
+            # 移除有问题的资源类型拦截代码
+            # 注意：下面的代码已被移除，因为它使用了无效的resourceType值
+            # resource_types = ['script', 'xhr', 'fetch', 'websocket']
+            # for resource_type in resource_types:
+            #     try:
+            #         await session.send('Network.setRequestInterception', {
+            #             'patterns': [{
+            #                 'resourceType': resource_type,
+            #                 'interceptionStage': 'Request'
+            #             }]
+            #         })
+            #     except Exception as e:
+            #         self.logger.warning(f"设置 {resource_type} 资源拦截失败: {e}")
             
             self.logger.info(f"CDP调试器已在页面 {page.url} 上激活。")
         except Exception as e:

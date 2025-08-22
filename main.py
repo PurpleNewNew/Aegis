@@ -88,13 +88,20 @@ async def main():
     finally:
         logging.info("正在优雅地关闭所有服务...")
 
-        for task in running_tasks + queue_tasks:
+        # 收集所有任务
+        all_tasks = running_tasks + queue_tasks
+        
+        # 取消所有未完成的任务
+        for task in all_tasks:
             if not task.done():
                 task.cancel()
         
-        results = await asyncio.gather(*(running_tasks + queue_tasks), return_exceptions=True)
-        for i, result in enumerate(results):
-            task_name = running_tasks[i].get_name()
+        # 等待所有任务完成
+        results = await asyncio.gather(*all_tasks, return_exceptions=True)
+        
+        # 处理结果
+        for i, (task, result) in enumerate(zip(all_tasks, results)):
+            task_name = task.get_name() if hasattr(task, 'get_name') else f"Task-{i}"
             if isinstance(result, asyncio.CancelledError):
                 logging.info(f"任务 '{task_name}' 已成功取消。")
             elif isinstance(result, Exception):

@@ -204,6 +204,36 @@ class DataCorrelationManager:
         session = self.active_sessions.get(session_id) or self.completed_sessions.get(session_id)
         return session
     
+    def get_or_create_session(self, page_url: str, trigger_event: Optional[Dict[str, Any]] = None) -> str:
+        """
+        获取或创建会话ID
+        
+        Args:
+            page_url: 页面URL，用于标识会话
+            trigger_event: 触发事件，用于创建新会话
+            
+        Returns:
+            str: 会话ID
+        """
+        # 首先尝试查找现有的活跃会话
+        for session_id, session in self.active_sessions.items():
+            if session.trigger_event and session.trigger_event.get('url') == page_url:
+                # 如果会话未过期，返回现有会话ID
+                if not session.is_expired():
+                    return session_id
+        
+        # 如果没有找到合适的活跃会话，创建新会话
+        if trigger_event is None:
+            # 创建一个基本的触发事件
+            trigger_event = {
+                'url': page_url,
+                'trigger': 'auto_created',
+                'timestamp': time.time()
+            }
+        
+        session_id = self.create_session(trigger_event)
+        return session_id
+        
     def get_active_session(self, session_id: str) -> Optional[AnalysisSession]:
         """获取活跃会话"""
         return self.active_sessions.get(session_id)
@@ -329,46 +359,83 @@ class DataCorrelationManager:
             except Exception as e:
                 self.logger.error(f"定期清理任务出错: {e}")
     
-    def get_session_analysis_context(self, session_id: str) -> Optional[Dict[str, Any]]:
+    def generate_analysis_context(self, session_id: str) -> Dict[str, Any]:
         """
-        获取会话的分析上下文，用于AI分析
+        生成会话的分析上下文
         
         Args:
             session_id: 会话ID
             
         Returns:
-            Dict: 包含所有相关数据的分析上下文
+            Dict: 包含会话相关数据的分析上下文
         """
-        session = self.get_session(session_id)
+        session = self.active_sessions.get(session_id)
         if not session:
-            return None
+            session = self.completed_sessions.get(session_id)
+            
+        if not session:
+            self.logger.warning(f"尝试生成不存在的会话上下文: {session_id}")
+            return {}
         
-        # 按时间顺序排序关联数据
-        sorted_data = sorted(session.correlated_data, key=lambda x: x.sequence_id)
-        
-        # 构建分析上下文
+        # 收集所有关联的数据
         context = {
             'session_id': session_id,
             'trigger_event': session.trigger_event,
             'start_time': session.start_time,
+            'duration': time.time() - session.start_time,
             'status': session.status.value,
-            'correlated_data': {
-                'cdp_events': [],
-                'network_data': [],
-                'js_hook_events': []
-            },
-            'timeline': []
+            'data_summary': {}
         }
         
-        # 按类型分类数据
-        for item in sorted_data:
-            context['correlated_data'][item.data_type].append(item.data)
-            context['timeline'].append({
-                'type': item.data_type,
-                'timestamp': item.timestamp,
-                'sequence_id': item.sequence_id
-            })
+        # 按类型汇总数据
+        data_types = ['cdp_event', 'network_request', 'network_response', 'js_hook_event', 'ai_analysis']
+        for data_type in data_types:
+            data_items = session.get_data_by_type(data_type)
+            if data_items:
+                context['data_summary'][data_type] = {
+                    'count': len(data_items),
+                    'latest': data_items[-1].data if data_items else None,
+                    'all_data': [item.data for item in data_items]
+                }
         
+        # 获取完整的网络数据
+        network_data = []
+        network_items = session.get_data_by_type('network_request') + session.get_data_by_type('network_response')
+        for item in network_items:
+            if 'data_id' in item.data:
+                # 从DataHub获取完整数据
+                full_data = self.data_hub.get_data_by_id(item.data['data_id'])
+                if full_data:
+                    network_data.append(full_data)
+        
+        if network_data:
+            context['network_data'] = network_data
+            
+        # 获取JS钩子事件
+        js_events = []
+        js_items = session.get_data_by_type('js_hook_event')
+        for item in js_items:
+            if 'data_id' in item.data:
+                full_event = self.data_hub.get_data_by_id(item.data['data_id'])
+                if full_event:
+                    js_events.append(full_event)
+                    
+        if js_events:
+            context['js_events'] = js_events
+            
+        # 获取AI分析结果
+        ai_results = []
+        ai_items = session.get_data_by_type('ai_analysis')
+        for item in ai_items:
+            if 'data_id' in item.data:
+                full_analysis = self.data_hub.get_data_by_id(item.data['data_id'])
+                if full_analysis:
+                    ai_results.append(full_analysis)
+                    
+        if ai_results:
+            context['ai_analysis'] = ai_results
+            
+        self.logger.debug(f"生成了会话 {session_id} 的分析上下文，包含 {len(context.get('data_summary', {}))} 种数据类型")
         return context
     
     def get_stats(self) -> Dict[str, Any]:
@@ -379,7 +446,46 @@ class DataCorrelationManager:
             'completed_sessions': len(self.completed_sessions),
             'total_correlated_data': sum(len(s.correlated_data) for s in self.active_sessions.values())
         }
-    
+
+    def associate_data(self, session_id: str, data_type: str, data: Dict[str, Any], page_url: str = None) -> bool:
+        """
+        关联数据到指定会话（兼容CDP调试器调用的方法）
+        
+        Args:
+            session_id: 会话ID
+            data_type: 数据类型
+            data: 数据内容
+            page_url: 页面URL（可选，用于兼容性）
+            
+        Returns:
+            bool: 关联成功返回True，失败返回False
+        """
+        return self.correlate_data(session_id, data_type, data)
+
+    def get_correlated_data(self, session_id: str, data_type: str, page_url: str = None) -> Optional[List[Dict[str, Any]]]:
+        """
+        获取指定会话的关联数据（兼容CDP调试器调用的方法）
+        
+        Args:
+            session_id: 会话ID
+            data_type: 数据类型
+            page_url: 页面URL（可选，用于兼容性）
+            
+        Returns:
+            Optional[List[Dict[str, Any]]]: 关联数据列表，如果没有找到返回None
+        """
+        session = self.get_session(session_id)
+        if not session:
+            return None
+        
+        # 获取指定类型的数据
+        data_by_type = session.get_data_by_type(data_type)
+        if not data_by_type:
+            return None
+        
+        # 返回数据的实际内容
+        return [item.data for item in data_by_type]
+
     async def shutdown(self):
         """关闭管理器"""
         if hasattr(self, 'cleanup_task'):
