@@ -13,7 +13,7 @@ from playwright.async_api import Page, BrowserContext, Error as PlaywrightError
 from src.utils.browser_pool import BrowserPool
 from src.tools import browser_tools, auth_tools
 from src.tools.network_tools import NetworkSniffer
-from src.sast_tools import secret_scanner, xss_scanner
+from src.scanners import XSSStaticScanner, JSReverseScanner, ScannerManager
 from src.utils.unified_crypto_analyzer import UnifiedCryptoAnalyzer
 from src.prompts.prompt import get_interaction_analysis_prompt
 from src.utils.ai_logger import log_ai_dialogue
@@ -74,6 +74,11 @@ class InteractionWorker:
         
         # 初始化统一的加密分析器
         self.crypto_analyzer = UnifiedCryptoAnalyzer(self.config)
+        
+        # 初始化扫描器管理器
+        self.scanner_manager = ScannerManager(self.config)
+        self.xss_scanner = XSSStaticScanner(self.config)
+        self.js_scanner = JSReverseScanner(self.config)
 
     async def run(self):
         await self._load_js_hooks()
@@ -477,9 +482,13 @@ class InteractionWorker:
             analysis_modes=['static']
         )
         
+        # 使用新的扫描器架构
+        xss_result = await self.xss_scanner.scan(page_content, context={'url': page.url})
+        js_result = await self.js_scanner.scan(page_content, context={'url': page.url})
+        
         sast_results = {
-            'secrets': secret_scanner.find_secrets(page_content),
-            'xss_sinks': xss_scanner.find_xss_sinks(page_content),
+            'secrets': [vuln.to_dict() for vuln in js_result.vulnerabilities if vuln.type.value == 'secret_exposure'],
+            'xss_sinks': [vuln.to_dict() for vuln in xss_result.vulnerabilities],
             'crypto': [f.__dict__ for f in crypto_findings]  # 转换为字典格式
         }
         return {

@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional, List
 from asyncio import Queue
 from openai import AsyncOpenAI
 
-from src.prompts.js_analysis_prompts import get_js_analysis_prompt, get_js_crypto_detection_prompt, get_network_crypto_analysis_prompt
+from src.prompts.js_reverse_prompts import get_js_re_prompt
 from src.utils.ai_logger import log_ai_dialogue
 from src.utils.unified_crypto_analyzer import UnifiedCryptoAnalyzer
 

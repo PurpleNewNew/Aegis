@@ -45,8 +45,9 @@ class InvestigationManager:
         # 新增：用于存储每个URL上的交互链（带内存管理）
         self.interaction_chains: Dict[str, List[Dict]] = defaultdict(list)
         self.interaction_chain_timestamps: Dict[str, float] = {}  # 记录每个URL最后访问时间
-        self.max_chain_age = 3600  # 1小时后自动清理（秒）
-        self.max_chains = 1000     # 最大保存的URL数量
+        self.max_chain_age = 1800  # 30分钟后自动清理（秒）
+        self.max_chains = 100      # 最大保存的URL数量
+        self.max_chain_length = 50 # 每个URL最大交互事件数
         self.chain_cleanup_task = None
         
         # 导入交互序列管理器
@@ -64,6 +65,7 @@ class InvestigationManager:
         
         # 启动定期清理任务
         self.chain_cleanup_task = asyncio.create_task(self._periodic_chain_cleanup())
+        self.logger.info(f"已启用交互链内存管理：最大URL数={self.max_chains}, 最大链长={self.max_chain_length}, 清理间隔={self.max_chain_age}秒")
 
     async def initialize(self, main_browser: Browser, playwright: Any):
         """根据配置模式，初始化浏览器池。"""
@@ -112,7 +114,7 @@ class InvestigationManager:
             self.active_endpoints.remove(endpoint)
 
     async def run(self):
-        self.logger.info("调查任务管理器正在运行（v4 - 混合触发模式）。")
+        self.logger.info("调查任务管理器正在运行。")
         execution_mode = self.config.get('investigation_manager', {}).get('execution_mode', 'passive')
         self.logger.info(f"执行模式: {execution_mode}")
         
@@ -156,6 +158,12 @@ class InvestigationManager:
         self.interaction_chains[url].append(event)
         self.interaction_chain_timestamps[url] = asyncio.get_event_loop().time()
         self.previous_interaction_url = url
+        
+        # 限制每个URL的交互链长度
+        if len(self.interaction_chains[url]) > self.max_chain_length:
+            self.interaction_chains[url] = self.interaction_chains[url][-self.max_chain_length:]
+            self.logger.debug(f"截断交互链: {url} (长度: {len(self.interaction_chains[url])})")
+        
         self.logger.info(f"记录交互事件: {event.get('interaction_type')} on {url}。当前链长度: {len(self.interaction_chains[url])}")
         
         # 检查是否需要清理过多的URL
@@ -279,8 +287,11 @@ class InvestigationManager:
         """定期清理过期的交互链"""
         while True:
             try:
-                await asyncio.sleep(600)  # 每10分钟检查一次
+                await asyncio.sleep(300)  # 每5分钟检查一次（更频繁的清理）
                 await self._cleanup_expired_chains()
+                # 强制垃圾回收
+                import gc
+                gc.collect()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -295,15 +306,21 @@ class InvestigationManager:
             if current_time - timestamp > self.max_chain_age:
                 expired_urls.append(url)
         
+        # 记录清理统计
+        total_chains_before = len(self.interaction_chains)
+        total_events_before = sum(len(chain) for chain in self.interaction_chains.values())
+        
         for url in expired_urls:
             if url in self.interaction_chains:
                 chain_length = len(self.interaction_chains[url])
                 del self.interaction_chains[url]
                 del self.interaction_chain_timestamps[url]
-                self.logger.info(f"清理过期的交互链: {url} (长度: {chain_length})")
+                self.logger.debug(f"清理过期交互链: {url} (长度: {chain_length})")
         
         if expired_urls:
-            self.logger.info(f"已清理 {len(expired_urls)} 个过期的交互链")
+            total_chains_after = len(self.interaction_chains)
+            total_events_after = sum(len(chain) for chain in self.interaction_chains.values())
+            self.logger.info(f"已清理 {len(expired_urls)} 个过期交互链，释放 {total_events_before - total_events_after} 个事件。当前: {total_chains_after} 链, {total_events_after} 事件")
     
     async def _cleanup_oldest_chains(self):
         """清理最旧的交互链（LRU策略）"""

@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 import aiofiles
 from pathlib import Path
 from asyncio import Queue

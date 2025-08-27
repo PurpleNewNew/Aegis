@@ -23,6 +23,7 @@ class CDPDebugger:
         self.cdp_sessions: Dict[Page, CDPSession] = {}
 
     def _is_in_whitelist(self, url: str) -> bool:
+        """检查URL是否在白名单中"""
         if not url or not url.startswith(('http://', 'https://')):
             return False
         if not self.whitelist_domains:
@@ -85,6 +86,7 @@ class CDPDebugger:
                 pass # 会话可能已关闭
 
     async def setup_debugger_for_page(self, page: Page):
+        """为页面设置调试器"""
         if not self._is_in_whitelist(page.url):
             return
 
@@ -109,6 +111,7 @@ class CDPDebugger:
             self.logger.error(f"为页面 {page.url} 设置调试器失败: {e}")
 
     async def run(self, browser: Browser):
+        """运行CDP调试器"""
         self.logger.info("CDP调试器(CDPDebugger)正在启动并接管浏览器...")
         try:
             if not browser.is_connected():

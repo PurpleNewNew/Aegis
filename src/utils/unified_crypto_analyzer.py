@@ -35,10 +35,12 @@ class UnifiedCryptoAnalyzer:
         
         # 从原有的模块导入功能
         from src.utils.crypto_analyzer import CryptoAnalyzer
-        from src.sast_tools.crypto_detector import detect_crypto_patterns
+        from src.scanners.js_reverse_scanner import JSReverseScanner
+        
+        # Initialize JSReverseScanner for crypto pattern detection
+        self.js_scanner = JSReverseScanner(self.config)
         
         self.static_analyzer = CryptoAnalyzer()
-        self.static_detector = detect_crypto_patterns
         
     def _load_crypto_patterns(self) -> Dict[str, List[str]]:
         """加载统一的加密模式配置"""
@@ -142,21 +144,22 @@ class UnifiedCryptoAnalyzer:
         """静态加密分析"""
         findings = []
         
-        # 使用原有的静态分析器
+        # 使用JSReverseScanner进行加密分析
         try:
-            # crypto_detector的结果
-            static_results = self.static_detector(code)
-            for result in static_results:
-                findings.append(CryptoFinding(
-                    type='pattern',
-                    subtype=result.get('type', 'unknown'),
-                    name=result.get('name', 'Unknown'),
-                    description=result.get('description', ''),
-                    severity=result.get('severity', 'Medium'),
-                    confidence=0.8,  # 静态分析置信度较高
-                    evidence=result.get('evidence', ''),
-                    location={'file': context.get('url', 'unknown')},
-                    recommendations=result.get('recommendations', []),
+            # 运行JS逆向扫描器
+            scan_result = await self.js_scanner.scan(code, context)
+            for vuln in scan_result.vulnerabilities:
+                if vuln.type.value in ['crypto_issue', 'weak_crypto', 'hardcoded_secret']:
+                    findings.append(CryptoFinding(
+                        type='vulnerability',
+                        subtype=vuln.type.value,
+                        name=vuln.title or 'Crypto Issue',
+                    description=vuln.description or '',
+                    severity=vuln.severity.value if hasattr(vuln.severity, 'value') else str(vuln.severity),
+                    confidence=vuln.confidence or 0.8,
+                    evidence=vuln.evidence or '',
+                    location={'file': context.get('url', 'unknown'), 'line': getattr(vuln, 'line_number', None)},
+                    recommendations=vuln.recommendations or [],
                     analysis_method='static'
                 ))
         except Exception as e:

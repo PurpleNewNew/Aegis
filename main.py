@@ -2,6 +2,8 @@ import asyncio
 import logging
 import yaml
 import os
+import sys
+from typing import Optional
 from playwright.async_api import async_playwright, Browser
 
 # 禁用ChromaDB遥测功能以防止网络连接警告
@@ -33,24 +35,50 @@ from src.workers.broadcaster import Broadcaster
 from src.workers.reporter_worker import ReporterWorker
 from src.workers.memory_worker import MemoryWorker
 from src.workers.js_reverse_worker import JSReverseWorker
+from src.utils.security_utils import SecurityUtils, ConfigValidator
+from src.utils.resource_manager import initialize_resource_management, cleanup_all_resources
 
 async def main():
     """
     初始化并运行Aegis应用的所有组件，采用集中式Playwright生命周期管理。
     """
-    logging.info("Aegis应用正在启动 (vFinal - 集中式Playwright管理)...")
+    logging.info("Aegis应用正在启动...")
 
     # 1. 加载配置
     try:
         with open('config.yaml', 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
-        logging.info("配置加载成功。")
-    except Exception as e:
-        logging.error(f"加载或解析配置文件失败: {e}")
+        
+        # 验证配置
+        validation_errors = ConfigValidator.validate_config(config)
+        if validation_errors:
+            logging.error("配置验证失败:")
+            for error in validation_errors:
+                logging.error(f"  - {error}")
+            return
+            
+        logging.info("配置加载并验证成功。")
+    except FileNotFoundError:
+        logging.error("配置文件 config.yaml 不存在")
+        return
+    except yaml.YAMLError as e:
+        logging.error(f"配置文件格式错误: {e}")
+        return
+    except OSError as e:
+        logging.error(f"读取配置文件失败: {e}")
         return
 
-    os.makedirs(config.get('reporter', {}).get('output_dir', './reports'), exist_ok=True)
-    os.makedirs(os.path.dirname(config.get('logging', {}).get('ai_dialogues_file', './logs/ai_dialogues.jsonl')), exist_ok=True)
+    # 安全创建必要的目录
+    try:
+        reports_dir = config.get('reporter', {}).get('output_dir', './reports')
+        SecurityUtils.create_safe_directory(reports_dir)
+        
+        log_file = config.get('logging', {}).get('ai_dialogues_file', './logs/ai_dialogues.jsonl')
+        log_dir = os.path.dirname(log_file)
+        SecurityUtils.create_safe_directory(log_dir)
+    except Exception as e:
+        logging.error(f"创建必要目录失败: {e}")
+        return
 
     running_tasks = []
     manager = None
@@ -67,15 +95,33 @@ async def main():
         # 步骤 2: 连接到主浏览器
         # --------------------------------------------------------------------
         browser_config = config.get('browser', {})
-        browser = await playwright.chromium.connect_over_cdp(f"http://localhost:{browser_config['remote_debugging_port']}")
-        logging.info("成功连接到主浏览器实例。")
+        remote_port = browser_config.get('remote_debugging_port')
+        if not remote_port:
+            logging.error("配置中缺少 remote_debugging_port")
+            return
+            
+        try:
+            browser = await playwright.chromium.connect_over_cdp(f"http://localhost:{remote_port}")
+            logging.info("成功连接到主浏览器实例。")
+        except Exception as e:
+            logging.error(f"连接到主浏览器失败: {e}")
+            logging.error("请确保Chrome已使用 --remote-debugging-port 参数启动")
+            return
 
         # --------------------------------------------------------------------
-        # 步骤 3: 协同初始化，传入共享的实例
+        # 步骤 3: 初始化资源管理和协同组件
         # --------------------------------------------------------------------
-        manager = InvestigationManager(input_q=navigation_q, output_q=ai_output_q, debug_q=debug_events_q, config=config)
-        await manager.initialize(browser, playwright)
-        logging.info("调查管理器和浏览器池初始化成功。")
+        try:
+            # 初始化资源管理
+            await initialize_resource_management()
+            logging.info("资源管理器已启动。")
+            
+            manager = InvestigationManager(input_q=navigation_q, output_q=ai_output_q, debug_q=debug_events_q, config=config)
+            await manager.initialize(browser, playwright)
+            logging.info("调查管理器和浏览器池初始化成功。")
+        except Exception as e:
+            logging.error(f"初始化组件失败: {e}", exc_info=True)
+            return
 
         scout = CDPController(output_q=navigation_q, config=config)
         debugger = UnifiedCDPDebugger(
@@ -115,7 +161,11 @@ async def main():
         # 步骤 4: 运行
         # --------------------------------------------------------------------
         logging.info(f"Aegis所有 {len(running_tasks)} 个模块已启动。请开始浏览网页...")
-        await asyncio.gather(*running_tasks)
+        try:
+            await asyncio.gather(*running_tasks)
+        except Exception as e:
+            logging.error(f"主运行循环发生错误: {e}", exc_info=True)
+            raise
 
     except asyncio.CancelledError:
         logging.info("应用主任务收到关闭信号...")
@@ -160,3 +210,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("用户请求关闭。")
+    except Exception as e:
+        logging.error(f"程序发生未处理的异常: {e}", exc_info=True)
+        sys.exit(1)

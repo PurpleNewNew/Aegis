@@ -29,6 +29,7 @@ class CDPController:
             return url # 解析失败则返回原URL
 
     def _is_in_whitelist(self, url: str) -> bool:
+        """检查URL是否在白名单中"""
         if not url or not url.startswith(('http://', 'https://')):
             return False
         if not self.whitelist_domains:
@@ -46,6 +47,7 @@ class CDPController:
             return False
 
     async def handle_frame_navigated(self, frame: Frame):
+        """处理框架导航事件"""
         try:
             if not frame.page or frame.page.is_closed() or not frame.page.context or not frame.page.context.browser or not frame.page.context.browser.is_connected():
                 return
@@ -81,6 +83,7 @@ class CDPController:
             self.logger.warning(f"处理导航事件时出错（可能是浏览器已关闭）: {e}")
 
     async def setup_page_listeners(self, page: Page):
+        """为页面设置监听器"""
         if not self._is_in_whitelist(page.url):
             self.logger.debug(f"页面 {page.url} 不在白名单内，跳过监听器设置。")
             return
@@ -90,6 +93,7 @@ class CDPController:
             page.on("framenavigated", self.handle_frame_navigated)
 
             async def on_user_interaction(interaction_data: Dict[str, Any]):
+                """处理用户交互事件"""
                 if not isinstance(interaction_data, dict) or not interaction_data.get('selector'):
                     self.logger.debug(f"收到格式不完整或无选择器的交互事件，已忽略: {interaction_data}")
                     return
@@ -214,6 +218,7 @@ class CDPController:
             self.logger.error(f"为页面 {page.url} 设置监听器失败: {e}")
 
     async def run(self, browser: Browser):
+        """运行CDP控制器"""
         self.logger.info("侦察兵控制器(CDPController)正在启动并接管浏览器...")
         try:
             if not browser.is_connected():

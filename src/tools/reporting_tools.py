@@ -1,6 +1,5 @@
-
 """
-用于AI代理与内部状态交互的“伪”工具。
+用于AI代理与内部状态交互的"伪"工具。
 这些函数本身不执行复杂操作，而是作为AI向AgentWorker传递结构化数据的一种方式。
 """
 from typing import Literal

@@ -1,5 +1,5 @@
 /**
- * Aegis Unified Hooks - 统一的JavaScript钩子脚本
+ * Aegis统一钩子 - 统一的JavaScript钩子脚本
  * 
  * 此文件合并了以下功能：
  * - IAST检测：检测XSS、危险函数调用等
@@ -18,7 +18,7 @@
     }
     window.__aegis_unified_hooked = true;
 
-    console.log("Aegis Unified hooks are being installed.");
+    console.log("Aegis统一钩子正在安装。");
 
     // 配置
     const config = {
@@ -46,7 +46,7 @@
                 reported_by: 'unified_hooks'
             });
         } else {
-            console.warn(`Aegis Unified: Report function not found for type: ${type}`, event);
+            console.warn(`Aegis统一钩子: 未找到类型: ${type} 的报告函数`, event);
         }
     };
 
@@ -62,7 +62,7 @@
                         sink: 'innerHTML',
                         value: value.substring(0, 100),
                         url: window.location.href,
-                        description: 'Potential XSS: A script tag was inserted into innerHTML.'
+                        description: '潜在XSS: script标签被插入到innerHTML中。'
                     }, 'iast');
                 }
                 return originalInnerHTMLSetter.call(this, value);
@@ -77,7 +77,7 @@
                 sink: 'eval',
                 value: str.substring(0, 100),
                 url: window.location.href,
-                description: 'Dangerous Function Call: eval() was used.'
+                description: '危险函数调用: 使用了eval()。'
             }, 'iast');
             return originalEval.apply(this, arguments);
         };
@@ -91,7 +91,7 @@
                     sink: 'document.write',
                     value: str.substring(0, 100),
                     url: window.location.href,
-                    description: 'Potential XSS: document.write() with script content.'
+                    description: '潜在XSS: document.write()带有脚本内容。'
                 }, 'iast');
             }
             return originalDocumentWrite.apply(this, arguments);
@@ -106,7 +106,7 @@
                     sink: 'setTimeout',
                     value: callback.substring(0, 100),
                     url: window.location.href,
-                    description: 'Potential XSS: setTimeout() with script string.'
+                    description: '潜在XSS: 带有脚本字符串的setTimeout()。'
                 }, 'iast');
             }
             return originalSetTimeout.call(this, callback, delay, ...args);
@@ -120,7 +120,7 @@
                     sink: 'setInterval',
                     value: callback.substring(0, 100),
                     url: window.location.href,
-                    description: 'Potential XSS: setInterval() with script string.'
+                    description: '潜在XSS: 带有脚本字符串的setInterval()。'
                 }, 'iast');
             }
             return originalSetInterval.call(this, callback, delay, ...args);
@@ -283,5 +283,5 @@
         return originalAddEventListener.call(this, type, wrappedListener, options);
     };
 
-    console.log("Aegis Unified hooks installation completed.");
+    console.log("Aegis统一钩子安装完成。");
 })();

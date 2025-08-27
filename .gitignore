@@ -6,3 +6,4 @@ reports/
 Gemini.md
 CLAUDE.md
 **/*.pyc
+.claude/

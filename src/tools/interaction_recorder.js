@@ -7,7 +7,7 @@
     }
     window.__aegis_interaction_recorder = true;
     
-    console.log("Aegis Interaction Recorder is being installed.");
+    console.log("Aegis交互录制器正在安装。");
     
     // 存储操作序列
     let interactionSequence = [];
@@ -96,7 +96,7 @@
             window.__aegis_report_interaction__(interaction);
         }
         
-        console.log('Aegis: Recorded interaction', interaction);
+        console.log('Aegis: 已记录交互', interaction);
     }
     
     // 监听所有交互事件
@@ -201,7 +201,7 @@
         recordingStartTime = Date.now();
         interactionSequence = [];
         
-        console.log('Aegis: Started recording interactions');
+        console.log('Aegis: 开始录制交互');
         
         // 发送开始事件
         if (window.__aegis_report_interaction__) {
@@ -219,7 +219,7 @@
         
         isRecording = false;
         
-        console.log('Aegis: Stopped recording. Total interactions:', interactionSequence.length);
+        console.log('Aegis: 停止录制。总交互数:', interactionSequence.length);
         
         // 发送结束事件和完整序列
         if (window.__aegis_report_interaction__) {

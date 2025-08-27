@@ -26,6 +26,7 @@ class CDPJSReverseDebugger:
         self.pending_scripts: Dict[str, asyncio.Future] = {}  # 等待脚本解析完成的Future
 
     def _is_in_whitelist(self, url: str) -> bool:
+        """检查URL是否在白名单中"""
         if not url or not url.startswith(('http://', 'https://')):
             return False
         if not self.whitelist_domains:
