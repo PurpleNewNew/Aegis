@@ -1,4 +1,3 @@
-
 # Aegis扫描器配置
 
 browser:
@@ -6,127 +5,81 @@ browser:
   remote_debugging_port: 9222
 
 browser_pool:
-  # =================================================================
-  # 浏览器池模式选择 - 重要决策！
-  # =================================================================
-  
-  # 模式选项：'shared' 或 'standalone'
   mode: 'standalone'
-  # ----------------------------------------------------------------
-  # 🤔 如何选择？
-  # ----------------------------------------------------------------
-  # • 无感体验优先级高 → standalone
-  # • 认证实时性要求极高 → shared （但会破坏无感）
-  # • 生产环境部署 → standalone
-  
-  # 并行影子浏览器数量配置
-  # 被动模式固定使用1个浏览器（无感监听）
-  # 主动模式可使用多个浏览器并行测试
   passive_mode_pool_size: 1
   active_mode_pool_size: 5
-  # 兼容性配置（如果未指定模式特定大小，使用此值）
   pool_size: 3
-  
-  # 认证同步设置（仅 standalone 模式生效）
-  # 实时监听间隔（秒）- 更频繁的检查意味着更好的实时性但更高的CPU使用
   realtime_check_interval: 2
-  # 定时同步间隔（秒）- 作为实时监听的备份机制
   periodic_sync_interval: 30
 
 scanner_scope:
-  # 重要：只有在此列表中的域名/IP才会被分析。
-  # 支持主域名匹配，如填写 "ctf.show" 可匹配所有 "*.ctf.show" 子域名
   whitelist_domains: ["ctf.show","121.43.58.124","127.0.0.1"]
 
-llm_service:
-  # =================================================================
-  # AI推理设置
-  # =================================================================
-  
-  # 推理等级: 'high' (信息最全，最智能), 'medium' (平衡), 或 'low' (信息精简，速度最快)
-  # 对于gpt-oss等推理较慢的模型，推荐使用 'medium' 或 'low'
-  reasoning_level: 'high'
+# =================================================================
+# 扫描器模块化配置
+# =================================================================
+scanners:
+  # 在这里列出所有需要启用的扫描器模块的名称
+  # 名称应与 src/scanners/ 目录下的文件名（不含.py）完全对应
+  enabled:
+    - xss_scanner
+    - ssti_scanner
+    # - js_reverse_scanner # 这个被注释掉了，所以不会加载
 
-  # 使用与OpenAI兼容的本地/远程API服务（如 LM Studio 或 Ollama 的 OpenAI 兼容模式）。
+  # (可选) 为每个扫描器提供独立的详细配置
+  # key必须与扫描器类名(ClassName)完全对应
+  configs:
+    XSSDynamicScanner:
+      test_headers: false # 例如，可以覆盖XSS动态扫描器的默认配置
+      custom_payloads:
+        - "<my-custom-payload>"
+    SSTIScanner:
+      # SSTI扫描器的特定配置
+      another_option: true
+
+llm_service:
+  reasoning_level: 'high'
   api_config:
     base_url: "http://localhost:1234/v1"
-    model_name: "openai/gpt-oss-20b" # LM Studio中的模型名称
+    model_name: "openai/gpt-oss-20b"
     api_key: "lm-studio"
-    timeout: 500 # 20B模型可能需要较长推理时间，保持500秒超时
+    timeout: 500
 
 chromadb:
-  # 存储向量数据库文件的路径。
   path: "./chroma_db"
   collection_name: "aegis_memories"
 
 investigation_manager:
-  # 执行模式选择：'autonomous'（自主决策）或 'passive'（无感被动）
   execution_mode: 'passive'
-  # ----------------------------------------------------------------
-  # 🤔 如何选择？
-  # ----------------------------------------------------------------
-  # • 完全自动化测试 → autonomous
-  # • 仅在用户交互时分析 → passive （推荐用于无感被动模式）
-  
-  # 被动模式配置
   passive_mode:
-    # 是否启用交互事件监听
     enable_interaction_monitoring: true
-    # 交互分析深度：'basic'（基础分析）或 'deep'（深度分析）
     analysis_depth: 'deep'
-    # 是否在交互时自动执行安全测试
     auto_security_testing: true
-    # 交互类型过滤（只分析指定类型的交互）
-    # 可选值：'click', 'submit', 'input', 'navigation'
     interaction_types: ['click', 'submit', 'input']
-    # 分析超时时间（秒）
     analysis_timeout: 360
-    # 是否生成交互分析报告
     generate_interaction_reports: true
 
 reporter:
-  # 保存分析报告的目录。
   output_dir: "./reports"
 
 logging:
-  # 用于存储与AI完整对话以供调试的文件。
   ai_dialogues_file: "./logs/ai_dialogues.jsonl"
 
-# =================================================================
-# JS逆向功能配置
-# =================================================================
 js_reverse:
-  # 是否启用JS逆向功能
   enabled: true
-  # 分析模式：'basic'（基础分析）或 'deep'（深度分析）
   analysis_mode: 'deep'
-  # 监控的加密函数模式
   crypto_patterns:
-    # 常见的加密函数名模式
     function_patterns: ['encrypt', 'decrypt', 'encode', 'decode', 'hash', 'md5', 'sha', 'aes', 'rsa', 'base64']
-    # 需要监控的原生方法
     native_methods: ['atob', 'btoa', 'eval', 'Function', 'setTimeout', 'setInterval']
-  # 网络请求监控
   network_monitoring:
-    # 是否监控网络请求
     enabled: true
-    # 需要捕获的请求头
     capture_headers: ['authorization', 'token', 'signature', 'sign', 'x-token']
-    # 需要捕获的请求参数
     capture_params: ['password', 'pass', 'pwd', 'token', 'key', 'secret']
-  # 事件监控
   event_monitoring:
-    # 监控的事件类型
     event_types: ['click', 'submit', 'input', 'change', 'keydown', 'keyup']
-    # 深度分析的事件
     deep_analysis_events: ['click', 'submit']
-  # 输出配置
   output:
-    # 是否保存逆向分析报告
     save_reports: true
-    # 报告保存目录
     report_dir: "./reports/js_reverse"
-    # 是否保存捕获的脚本
     save_scripts: true
-    # 脚本保存目录
     script_dir: "./reports/js_reverse/scripts"

@@ -15,7 +15,7 @@ from src.tools import browser_tools, auth_tools
 from src.tools.network_tools import NetworkSniffer
 from src.scanners import XSSStaticScanner, JSReverseScanner, ScannerManager
 from src.utils.unified_crypto_analyzer import UnifiedCryptoAnalyzer
-from src.prompts.prompt import get_interaction_analysis_prompt
+from src.prompts.interaction_prompts import get_interaction_analysis_prompt
 from src.utils.ai_logger import log_ai_dialogue
 from src.utils.interaction_replayer import InteractionReplayer
 from src.utils.interaction_sequence_manager import InteractionValidator

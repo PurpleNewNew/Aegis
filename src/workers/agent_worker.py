@@ -7,7 +7,7 @@ from playwright.async_api import BrowserContext, Page
 from typing import List, Dict, Any, Callable, Optional
 from asyncio import Queue, Semaphore, Task
 
-from src.prompts.prompt import get_agent_reasoning_prompt
+from src.prompts.agent_prompts import get_agent_reasoning_prompt
 from src.tools import browser_tools, auth_tools
 from src.tools.network_tools import NetworkSniffer
 from src.scanners import XSSStaticScanner, JSReverseScanner, ScannerManager
