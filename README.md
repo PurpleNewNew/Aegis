@@ -30,76 +30,73 @@ Aegis的最终形态，由三大核心理念驱动，旨在最大限度地模仿
 
 ## 工作原理
 
-### 最终架构图
+Aegis的核心是双模驱动架构，不同模式下，各组件的协同方式不同。
+
+### 被动模式 (Passive Mode) 工作流
+
+在被动模式下，框架的核心是**无感地监听和分析用户产生的交互**。其职责被清晰地划分为“交互分析”和“会话保持”，由两个不同的Worker协同完成，以达到最高效率。
 
 ```mermaid
 graph TD
-    subgraph "侦察与调度 (用户侧)"
+    subgraph 用户侧 (User Side)
         direction LR
-        User[👤 用户] --> MainBrowser(🌐 主浏览器)
-        MainBrowser -- "导航/调试事件" --> CDP_Components[CDP组件 (控制器/调试器)]
-        CDP_Components -- "导航事件" --> Q_Nav[导航队列]
-        CDP_Components -- "CDP调试事件" --> Q_Debug[调试事件队列]
-        Q_Nav --> Manager[调查任务管理器]
+        User[👤 用户] -- 1. 正常操作 --> MainBrowser(🌐 主浏览器)
+        MainBrowser -- 2. 交互事件 --> CDPController(CDP 控制器)
+        CDPController -- 3. 事件入队 --> InteractionQueue(交互事件队列)
     end
 
-    subgraph "AI代理核心 (后台)"
+    subgraph 调度与分析 (Manager & Analysis)
         direction TB
-        Manager -- "为每个URL启动一个AI代理" --> Agent[🤖 AI指挥官<br/>AgentWorker]
-        Q_Debug -- "注入实时调试情报" --> Agent
+        InvestigationManager[🕵️ 调查任务管理器] -- 4. 读取交互 --> InteractionQueue
+        InvestigationManager -- 5. 聚合后派发分析任务 --> InteractionWorker(👩‍🔬 交互分析器)
+        InteractionWorker -- 6. 获取已登录的浏览器 --> BrowserPool[(🕶️ 浏览器池)]
+        InteractionWorker -- 7. 在后台重放并分析 --> AnalysisLoop{分析循环}
+        AnalysisLoop -- 8. 输出报告 --> Reporter(📋 报告生成)
     end
 
-    subgraph "AI代理的作战循环"
-        direction LR
-        Agent -- "1. 控制" --> ShadowBrowser(🕶️ 影子浏览器)
-        ShadowBrowser -- "2. 观察" --> Agent
-        Agent -- "3. SAST扫描" --> SAST[静态分析工具]
-        SAST -- "4. 静态线索" --> Agent
-        Agent -- "5. 思考决策<br/>(结合所有情报)" --> LLM[(LLM)]
-        LLM -- "6. 下一步行动" --> Agent
+    subgraph 会话保持 (Session Holder)
+        direction TB
+        AgentWorker_Passive[🤖 AgentWorker <br>(会话保持模式)] -- "a. 登录并准备好环境" --> BrowserPool
+        InvestigationManager -- "b. (可选)启动会话保持" --> AgentWorker_Passive
     end
 
-    classDef internal fill:#E8F8F5,stroke:#16A085,stroke-width:2px
-    classDef external fill:#FEF9E7,stroke:#F1C40F,stroke-width:2px
-    class User,MainBrowser,LLM external
-    class CDP_Components,Manager,Agent,ShadowBrowser,SAST,Q_Nav,Q_Debug internal
+    classDef user fill:#E8F8F5,stroke:#16A085,stroke-width:2px
+    classDef manager fill:#FEF9E7,stroke:#F1C40F,stroke-width:2px
+    class User, MainBrowser, CDPController, InteractionQueue user
+    class InvestigationManager, InteractionWorker, BrowserPool, AnalysisLoop, Reporter, AgentWorker_Passive manager
 ```
 
-### 工作流时序图
+### 主动模式 (Autonomous Mode) 工作流
+
+在主动模式下，`AgentWorker` 成为绝对核心，作为一个自主代理，在目标网站上执行“观察-思考-行动”的循环，主动探索和攻击。
 
 ```mermaid
-sequenceDiagram
-    participant User as 用户
-    participant Manager as 调查任务管理器
-    participant Agent as 🤖 AI代理
-    participant Tools as 工具箱 (SAST/DAST)
-    participant Debugger as UnifiedCDPDebugger
-    participant LLM as LLM (决策核心)
-
-    User->>Manager: 1. 浏览网页，触发导航事件
-    activate Manager
-    Manager->>Agent: 2. 启动AI代理，分配调查任务
-    deactivate Manager
-
-    activate Agent
-    loop AI的“观察-思考-行动”循环
-        Agent->>Tools: 3. 执行DAST工具 (如点击、输入)
-        Tools-->>Agent: 4. 返回交互结果 (新的页面状态)
-        
-        Agent->>Tools: 5. 将新状态送往SAST工具扫描
-        Tools-->>Agent: 6. 返回静态分析线索
-
-        par 并行情报收集
-            Debugger-->>Agent: 7a. (并行) 实时注入CDP断点捕获的运行时信息
-        and
-            Agent-->>Agent: 7b. (并行) 自我总结，更新工作记忆
-        end
-
-        Note over Agent, LLM: 将所有情报(DAST/SAST/CDP Debug)汇总
-        Agent->>LLM: 8. 请求进行综合决策
-        LLM-->>Agent: 9. 返回下一步行动指令
+graph TD
+    subgraph 启动 (Initiation)
+        direction LR
+        InvestigationManager[🕵️ 调查任务管理器] -- 1. 分配任务和目标URL --> AgentWorker_Active(🤖 AgentWorker)
     end
-    deactivate Agent
+
+    subgraph "AI代理的“思考-行动”循环"
+        direction TB
+        AgentWorker_Active -- 2. 获取浏览器 --> BrowserPool[(🕶️ 浏览器池)]
+        AgentWorker_Active -- 3. 观察 (Observe) --> Page(页面状态)
+        Page -- 4. 形成上下文 --> AgentWorker_Active
+        AgentWorker_Active -- 5. 思考 (Think) --> LLM[(LLM 决策)]
+        LLM -- 6. 返回工具调用 --> AgentWorker_Active
+        AgentWorker_Active -- 7. 行动 (Act) --> Tools(🛠️ 执行工具<br>如: browser_tools, scanners)
+        Tools -- 8. 更新页面状态 --> Page
+        subgraph "持续情报"
+            Debugger(CDP 调试器) -- IAST事件 --> AgentWorker_Active
+        end
+    end
+
+    AgentWorker_Active -- 9. 结束并报告 --> Reporter(📋 报告生成)
+
+    classDef manager fill:#FEF9E7,stroke:#F1C40F,stroke-width:2px
+    classDef agent fill:#E8F8F5,stroke:#16A085,stroke-width:2px
+    class InvestigationManager, BrowserPool, Reporter manager
+    class AgentWorker_Active, Page, LLM, Tools, Debugger agent
 ```
 
 ## 安装与使用
@@ -229,15 +226,25 @@ python tests/passive_mode/test_passive_mode_interaction.py
 
 Aegis 框架仍在快速演进中，以下是我们共同规划的、能带来质变的功能迭代方向：
 
-### 核心引擎与AI能力 (Core Engine & AI Capabilities)
-- [x] **深化CDP与IAST集成**: 让AI能主动消费和理解来自`debug_events_q`的实时调试和IAST事件，实现真正的运行时分析。
-- [ ] **实现AI工作记忆总结**: 在`AgentWorker`中增加“自我总结”步骤，解决长上下文限制，提升长期任务稳定性。
-- [ ] **实现“分析-验证”闭环**: 在高级DAST引擎的基础上，实现`情报收集 -> AI分析（漏洞假设） -> AI生成PoC -> DAST引擎执行PoC -> 验证结果 -> 最终确认报告`的完整闭环，消除误报。
+### 🚀 架构演进与核心重构 (Architectural Evolution & Core Refactoring)
 
-### DAST与攻击能力 (DAST & Attack Capabilities)
-- [ ] **构建高级DAST引擎 (PoC-Driven DAST Engine)**
+- [ ] **统一分析流程: 确立AI Agent的“总指挥”地位**
+  - **目标**: 将`ScannerManager`改造为AI Agent可调用的工具，实现由AI根据上下文智能决策、触发特定扫描的统一分析流程。
+  - **价值**: 消除当前分析路径的割裂，实现真正的“智能编排”，让AI成为驱动所有扫描行为的核心。
+
+- [ ] **引入依赖注入 (DI) 与服务容器**
+  - **目标**: 在`main.py`中创建全局“服务容器”，集中管理`LLMClient`, `BrowserPool`等核心服务，并以依赖注入方式传递给各工作模块。
+  - **价值**: 大幅降低模块间耦合，提升代码的可测试性和可维护性。
+
+- [ ] **分析逻辑服务化与代码整合**
+  - **目标**: 将`AgentWorker`和`InteractionWorker`中重复的分析逻辑（如页面快照、调用扫描等）抽象成可复用的`AnalysisService`。
+  - **价值**: 减少代码冗余，使核心工作模块的职责更单一、清晰。
+
+### 🎯 功能增强与能力跃迁 (Feature Enhancement & Capability Leap)
+
+- [ ] **DAST引擎的成熟化 (PoC驱动)**
   - **描述**: 将当前的DAST测试升级为一个可编排、支持复杂PoC的工作流引擎，使其接近Nuclei等专业工具的能力。
-  - **已完成**: 
+  - **已完成**:
     - [x] 将Payloads从硬编码重构为外部JSON/YAML文件。
     - [x] 实现了SSTI漏洞检测的原型。
     - [x] 实现了URL参数的增量分析原型。
@@ -245,10 +252,16 @@ Aegis 框架仍在快速演进中，以下是我们共同规划的、能带来�
     - [ ] **定义PoC格式**: 设计一套机器可读的YAML格式，用于描述多步请求、变量提取、复杂匹配器等。
     - [ ] **实现状态化引擎**: 支持在多步请求之间传递状态（如CSRF Token）。
     - [ ] **增强匹配器 (Matcher)**: 实现更强大的结果断言能力，支持基于状态码、响应头、正则表达式、DSL等多种条件的判断。
-    - [ ] **支持带外检测 (OOB)**: 增加对SSRF等带外漏洞的检测支持，允许用户在`config.yaml`中配置自己的Callback服务器地址。
-- [ ] **吸取业界工具经验**: 借鉴fenjing, xscan, sqlmap等优秀工具的设计思想和测试技巧，丰富Aegis的武器库。
+    - [ ] **支持带外检测 (OOB)**: 增加对SSRF等带外漏洞的检测支持。
 
-### 易用性与流程优化 (Usability & Flow Optimization)
+- [ ] **核心引擎与AI能力**
+  - **已完成**:
+    - [x] **深化CDP与IAST集成**: 让AI能主动消费和理解来自`debug_events_q`的实时调试和IAST事件。
+  - **待办 (TODO)**:
+    - [ ] **实现“分析-验证”闭环**: 在高级DAST引擎的基础上，实现`情报收集 -> AI分析 -> AI生成PoC -> DAST执行 -> 验证结果`的完整闭环。
+    - [ ] **实现AI工作记忆总结**: 在`AgentWorker`中增加“自我总结”步骤，解决长上下文限制。
+
+### 🧩 易用性与流程优化 (Usability & Flow Optimization)
 - [x] **优化导航与增量分析**: 引入"URL端点规范化"逻辑，避免对同一页面的重复性重量级分析。
 - [x] **被动模式状态化重放**: 实现对用户连续操作链的记录与复现，确保对复杂交互的分析上下文绝对准确。
 - [ ] **增强启动逻辑**: 优化启动行为，使其能自动发现并分析所有已打开的、在白名单内的标签页，并智能选择认证状态。
