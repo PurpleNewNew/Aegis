@@ -13,9 +13,13 @@ from playwright.async_api import Page, BrowserContext, Error as PlaywrightError
 from src.utils.browser_pool import BrowserPool
 from src.tools import browser_tools, auth_tools
 from src.tools.network_tools import NetworkSniffer
-from src.sast_tools import secret_scanner, xss_scanner, crypto_detector
+from src.sast_tools import secret_scanner, xss_scanner
+from src.utils.unified_crypto_analyzer import UnifiedCryptoAnalyzer
 from src.prompts.prompt import get_interaction_analysis_prompt
 from src.utils.ai_logger import log_ai_dialogue
+from src.utils.interaction_replayer import InteractionReplayer
+from src.utils.interaction_sequence_manager import InteractionValidator
+from src.utils.retry_utils import retry_async, RetryManager
 
 class InteractionWorker:
     """
@@ -49,11 +53,27 @@ class InteractionWorker:
         self.report_interval = 60
         self.target_url = None
         
+        # 线程安全锁
+        self.iast_findings_lock = asyncio.Lock()
+        self.findings_lock = asyncio.Lock()
+        self.history_lock = asyncio.Lock()
+        
+        # 重试管理器
+        self.retry_manager = RetryManager(
+            max_attempts=3,
+            base_delay=1.0,
+            max_delay=30.0,
+            backoff_factor=2.0
+        )
+        
         llm_config = self.config.get('llm_service', {})
         if llm_config and llm_config.get('api_config'):
             self.llm_client = AsyncOpenAI(base_url=llm_config['api_config'].get('base_url'), api_key=llm_config['api_config'].get('api_key'))
         else:
             self.llm_client = None
+        
+        # 初始化统一的加密分析器
+        self.crypto_analyzer = UnifiedCryptoAnalyzer(self.config)
 
     async def run(self):
         await self._load_js_hooks()
@@ -66,7 +86,8 @@ class InteractionWorker:
             while True:
                 debug_event = await self.debug_events_q.get()
                 self.logger.info(f"接收到IAST/CDP调试事件: {debug_event}")
-                self.iast_findings.append(debug_event)
+                async with self.iast_findings_lock:
+                    self.iast_findings.append(debug_event)
                 self.debug_events_q.task_done()
         except asyncio.CancelledError:
             self.logger.info("IAST/CDP事件监听器已关闭。")
@@ -82,6 +103,24 @@ class InteractionWorker:
         self.logger.info(f"接收到包含 {len(event_chain)} 个事件的[交互链]分析任务，最终动作为: {last_event.get('interaction_type')} on {last_event.get('url')}")
         asyncio.create_task(self._perform_analysis_workflow(event_chain))
 
+    async def analyze_interaction_sequence(self, sequence_data: Dict[str, Any]):
+        """分析完整的交互序列"""
+        if not self.auto_security_testing:
+            return
+        
+        url = sequence_data.get('url')
+        sequence = sequence_data.get('sequence', [])
+        auth_state = sequence_data.get('auth_state')
+        
+        if not url or not sequence:
+            return
+        
+        if not self.target_url:
+            self.target_url = url
+        
+        self.logger.info(f"接收到包含 {len(sequence)} 个操作的[交互序列]分析任务 on {url}")
+        asyncio.create_task(self._perform_sequence_analysis_workflow(url, sequence, auth_state))
+
     async def analyze_url(self, nav_info: Dict[str, Any]):
         if not self.auto_security_testing:
             return
@@ -92,7 +131,7 @@ class InteractionWorker:
 
     async def _load_js_hooks(self):
         try:
-            async with aiofiles.open('src/tools/js_hooks.js', mode='r', encoding='utf-8') as f:
+            async with aiofiles.open('src/tools/unified_hooks.js', mode='r', encoding='utf-8') as f:
                 self.js_hook_script = await f.read()
                 self.logger.info("IAST JS Hook脚本加载成功。")
         except Exception as e:
@@ -106,17 +145,38 @@ class InteractionWorker:
             except Exception as e:
                 self.logger.error(f"为页面 {page.url} 注入IAST Hooks失败: {e}")
 
+    @retry_async(max_attempts=3, delay=2.0, exceptions=(Exception,))
     async def _perform_analysis_workflow(self, event_chain: List[Dict[str, Any]]):
         context: Optional[BrowserContext] = None
+        url = None
+        from_pool = False
+        
         async with self.concurrency_semaphore:
             try:
-                context = await self.browser_pool.acquire()
+                # Try to get domain-specific context if available
+                url = event_chain[0].get('url', '')
+                if hasattr(self.browser_pool, 'create_context_for_domain'):
+                    context = await self.retry_manager.execute(
+                        self.browser_pool.create_context_for_domain,
+                        url,
+                        exceptions=(ConnectionError, TimeoutError, Exception)
+                    )
+                else:
+                    context = await self.retry_manager.execute(
+                        self.browser_pool.acquire,
+                        exceptions=(ConnectionError, TimeoutError, Exception)
+                    )
+                    from_pool = True
+                    
                 page = await context.new_page()
                 await self._setup_page_for_analysis(page)
 
                 initial_event = event_chain[0]
                 if initial_event.get('auth_state'):
+                    # Use enhanced auth injection with retry logic
                     await auth_tools.inject_auth_state(page, initial_event['auth_state'])
+                    # Also set up retry on navigation
+                    await auth_tools.inject_with_retry_on_navigation(page, initial_event['auth_state'])
                 
                 await browser_tools.navigate(page, initial_event['url'])
 
@@ -149,7 +209,123 @@ class InteractionWorker:
                 self.logger.error(f"状态化重放分析工作流发生错误: {e}", exc_info=True)
             finally:
                 if context:
-                    await self.browser_pool.release(context)
+                    # Only release to pool if it was acquired from pool
+                    if not from_pool:
+                        # For domain-specific contexts, just close them
+                        try:
+                            await context.close()
+                        except:
+                            pass
+                    else:
+                        await self.browser_pool.release(context)
+
+    @retry_async(max_attempts=2, delay=3.0, exceptions=(ConnectionError, TimeoutError))
+    async def _perform_sequence_analysis_workflow(self, url: str, sequence: List[Dict], auth_state: Dict = None):
+        """执行完整的交互序列分析工作流"""
+        context: Optional[BrowserContext] = None
+        from_pool = False
+        
+        async with self.concurrency_semaphore:
+            try:
+                # 获取浏览器上下文
+                if hasattr(self.browser_pool, 'create_context_for_domain'):
+                    context = await self.retry_manager.execute(
+                        self.browser_pool.create_context_for_domain,
+                        url,
+                        exceptions=(ConnectionError, TimeoutError, Exception)
+                    )
+                else:
+                    context = await self.retry_manager.execute(
+                        self.browser_pool.acquire,
+                        exceptions=(ConnectionError, TimeoutError, Exception)
+                    )
+                    from_pool = True
+                    
+                page = await context.new_page()
+                await self._setup_page_for_analysis(page)
+
+                # 注入认证状态
+                if auth_state:
+                    await auth_tools.inject_auth_state(page, auth_state)
+                    await auth_tools.inject_with_retry_on_navigation(page, auth_state)
+                
+                # 导航到目标页面
+                await browser_tools.navigate(page, url)
+                
+                # 创建并配置交互复现器
+                replayer = InteractionReplayer(page, {
+                    'wait_after_action': 0.3,  # 较短的等待时间
+                    'max_retries': 3
+                })
+                
+                # 验证序列是否可以复现
+                validator = InteractionValidator()
+                validation_result = await validator.validate_sequence(sequence, page)
+                
+                if not validation_result['valid']:
+                    self.logger.warning(f"交互序列验证失败: {validation_result['errors']}")
+                
+                # 复现交互序列
+                self.logger.info("开始复现交互序列...")
+                replay_success = await replayer.replay_sequence()
+                
+                if replay_success:
+                    self.logger.info("交互序列复现成功，开始分析...")
+                    
+                    # 捕获网络数据
+                    sniffer = NetworkSniffer()
+                    await sniffer.start_capture(page)
+                    
+                    # 等待可能的网络请求完成
+                    await asyncio.sleep(2)
+                    await sniffer.stop_capture(page)
+                    network_analysis = sniffer.analyze_api_calls()
+                    
+                    # 创建页面快照
+                    snapshot = await self._create_interaction_snapshot(page, {
+                        'url': url,
+                        'interaction_type': 'sequence_replay',
+                        'element_info': {}
+                    })
+                    
+                    # 执行分析
+                    analysis_results = await self._run_full_analysis(page, snapshot, {
+                        'url': url,
+                        'interaction_type': 'sequence_replay',
+                        'element_info': {}
+                    })
+                    analysis_results['network_packet_analysis'] = network_analysis
+                    analysis_results['sequence_validation'] = validation_result
+                    analysis_results['replay_success'] = replay_success
+                    
+                    if self.enable_llm_analysis:
+                        analysis_results['llm_analysis'] = await self._perform_llm_analysis(snapshot, {
+                            'url': url,
+                            'interaction_type': 'sequence_replay',
+                            'element_info': {}
+                        }, analysis_results)
+                    
+                    if self.generate_interaction_reports:
+                        await self._accumulate_and_report({
+                            'url': url,
+                            'interaction_type': 'sequence_replay',
+                            'element_info': {},
+                            'timestamp': asyncio.get_event_loop().time()
+                        }, snapshot, analysis_results)
+                else:
+                    self.logger.error("交互序列复现失败")
+                    
+            except Exception as e:
+                self.logger.error(f"交互序列分析工作流发生错误: {e}", exc_info=True)
+            finally:
+                if context:
+                    if not from_pool:
+                        try:
+                            await context.close()
+                        except:
+                            pass
+                    else:
+                        await self.browser_pool.release(context)
 
     async def _replay_single_interaction(self, page: Page, event: Dict[str, Any]):
         interaction_type = event.get('interaction_type')
@@ -208,8 +384,10 @@ class InteractionWorker:
 
     async def _accumulate_and_report(self, event, snapshot, analysis_results):
         new_findings = self._standardize_findings(event, snapshot, analysis_results)
-        self.cumulative_findings.extend(new_findings)
-        self.logger.info(f"累积了 {len(new_findings)} 个新发现，总计 {len(self.cumulative_findings)} 个发现")
+        async with self.findings_lock:
+            self.cumulative_findings.extend(new_findings)
+            total_findings = len(self.cumulative_findings)
+        self.logger.info(f"累积了 {len(new_findings)} 个新发现，总计 {total_findings} 个发现")
         current_time = event.get('timestamp', 0)
         if current_time - self.last_report_time >= self.report_interval:
             await self._output_cumulative_report()
@@ -265,30 +443,44 @@ class InteractionWorker:
         return all_findings
 
     async def _output_cumulative_report(self):
-        if not self.cumulative_findings:
-            self.logger.info("暂无发现，跳过报告输出")
-            return
+        async with self.findings_lock:
+            if not self.cumulative_findings:
+                self.logger.info("暂无发现，跳过报告输出")
+                return
+            findings_to_report = self.cumulative_findings.copy()
+            self.cumulative_findings = []
+        
+        async with self.history_lock:
+            history_length = len(self.interaction_history)
+        
         report_data = {
             'worker': 'InteractionWorker-Cumulative',
             'source_context': {
                 'initiator_url': self.target_url,
                 'mode': 'passive',
-                'total_interactions_analyzed': len(self.interaction_history)
+                'total_interactions_analyzed': history_length
             },
-            'findings': self.cumulative_findings,
+            'findings': findings_to_report,
             'timestamp': asyncio.get_event_loop().time()
         }
         await self.output_q.put(report_data)
-        self.logger.info(f"已输出包含 {len(self.cumulative_findings)} 个发现的累积报告。")
-        self.cumulative_findings = []
+        self.logger.info(f"已输出包含 {len(findings_to_report)} 个发现的累积报告。")
 
     async def _create_interaction_snapshot(self, page: Page, event: Dict[str, Any]) -> Dict[str, Any]:
         self.logger.info("创建交互点快照...")
         page_content = await page.content()
+        
+        # 使用统一的加密分析器
+        crypto_findings = await self.crypto_analyzer.analyze_crypto(
+            code=page_content,
+            context={'url': page.url},
+            analysis_modes=['static']
+        )
+        
         sast_results = {
             'secrets': secret_scanner.find_secrets(page_content),
             'xss_sinks': xss_scanner.find_xss_sinks(page_content),
-            'crypto': crypto_detector.detect_crypto_patterns(page_content)
+            'crypto': [f.__dict__ for f in crypto_findings]  # 转换为字典格式
         }
         return {
             "url": page.url,
@@ -302,7 +494,8 @@ class InteractionWorker:
     async def _perform_targeted_analysis(self, page: Page, snapshot: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
         analysis_results = {'sast_findings': snapshot['sast_results']}
         if self.analysis_depth == 'deep':
-            self.iast_findings.clear()
+            async with self.iast_findings_lock:
+                self.iast_findings.clear()
             results = await asyncio.gather(
                 self._analyze_js_and_crypto(page), # 移除冗余参数
                 self._run_shadow_browser_test(page, snapshot, event),
@@ -310,8 +503,9 @@ class InteractionWorker:
             )
             analysis_results['js_crypto_analysis'] = results[0] if not isinstance(results[0], Exception) else None
             analysis_results['shadow_browser_test_results'] = results[1] if not isinstance(results[1], Exception) else None
-            analysis_results['iast_findings'] = self.iast_findings.copy()
-            self.iast_findings.clear()
+            async with self.iast_findings_lock:
+                analysis_results['iast_findings'] = self.iast_findings.copy()
+                self.iast_findings.clear()
         return analysis_results
 
     async def _analyze_js_and_crypto(self, page: Page) -> Optional[Dict[str, Any]]: # 移除冗余参数
@@ -410,7 +604,8 @@ class InteractionWorker:
                         'evidence': f"URL: {test_url}",
                         'source': 'dast_url_param_scan'
                     }
-                    self.cumulative_findings.append(self._standardize_findings({}, {"target_element":{}}, {'llm_analysis':None, 'shadow_browser_test_results':{'security_findings':[finding]}})[0])
+                    async with self.findings_lock:
+                        self.cumulative_findings.append(self._standardize_findings({}, {"target_element":{}}, {'llm_analysis':None, 'shadow_browser_test_results':{'security_findings':[finding]}})[0])
                     self.logger.warning(f"高危发现: {finding['description']}")
                     break
 
@@ -433,15 +628,41 @@ class InteractionWorker:
             self.logger.error(f"LLM分析失败: {e}")
             return None
 
+    @retry_async(max_attempts=3, delay=5.0, exceptions=(TimeoutError, ConnectionError, Exception))
     async def _call_llm(self, prompt: str) -> Dict[str, Any]:
-        if not self.llm_client: return {'error': 'LLM client not initialized'}
+        if not self.llm_client: 
+            return {'error': 'LLM client not initialized'}
+        
         try:
             cfg = self.config['llm_service']['api_config']
-            messages = [{"role": "system", "content": "你是一位网络安全专家，擅长分析网页交互中的安全风险。"}, {"role": "user", "content": prompt}]
-            response = await asyncio.wait_for(self.llm_client.chat.completions.create(model=cfg['model_name'], messages=messages, max_tokens=1500, temperature=0.5), timeout=cfg.get('timeout', 300))
+            messages = [
+                {"role": "system", "content": "你是一位网络安全专家，擅长分析网页交互中的安全风险。"}, 
+                {"role": "user", "content": prompt}
+            ]
+            
+            # 使用更长的超时时间
+            timeout = cfg.get('timeout', 300)
+            response = await asyncio.wait_for(
+                self.llm_client.chat.completions.create(
+                    model=cfg['model_name'], 
+                    messages=messages, 
+                    max_tokens=1500, 
+                    temperature=0.5
+                ), 
+                timeout=timeout
+            )
+            
             content = response.choices[0].message.content
-            await log_ai_dialogue(prompt, content, self.config.get('logging', {}).get('ai_dialogues_file', './logs/ai_dialogues.jsonl'))
+            await log_ai_dialogue(
+                prompt, 
+                content, 
+                self.config.get('logging', {}).get('ai_dialogues_file', './logs/ai_dialogues.jsonl')
+            )
             return {'response': content}
+            
+        except asyncio.TimeoutError:
+            self.logger.error(f"LLM调用超时（{timeout}秒）")
+            return {'error': f'LLM call timeout after {timeout} seconds'}
         except Exception as e:
             self.logger.error(f"LLM调用失败: {e}")
             return {'error': str(e)}

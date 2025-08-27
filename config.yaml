@@ -19,8 +19,12 @@ browser_pool:
   # • 认证实时性要求极高 → shared （但会破坏无感）
   # • 生产环境部署 → standalone
   
-  # 并行影子浏览器数量，决定同时可以测试多少个页面
-  # 注意：standalone 模式下每个 context 都会创建独立的浏览器实例
+  # 并行影子浏览器数量配置
+  # 被动模式固定使用1个浏览器（无感监听）
+  # 主动模式可使用多个浏览器并行测试
+  passive_mode_pool_size: 1
+  active_mode_pool_size: 5
+  # 兼容性配置（如果未指定模式特定大小，使用此值）
   pool_size: 3
   
   # 认证同步设置（仅 standalone 模式生效）
@@ -87,3 +91,42 @@ reporter:
 logging:
   # 用于存储与AI完整对话以供调试的文件。
   ai_dialogues_file: "./logs/ai_dialogues.jsonl"
+
+# =================================================================
+# JS逆向功能配置
+# =================================================================
+js_reverse:
+  # 是否启用JS逆向功能
+  enabled: true
+  # 分析模式：'basic'（基础分析）或 'deep'（深度分析）
+  analysis_mode: 'deep'
+  # 监控的加密函数模式
+  crypto_patterns:
+    # 常见的加密函数名模式
+    function_patterns: ['encrypt', 'decrypt', 'encode', 'decode', 'hash', 'md5', 'sha', 'aes', 'rsa', 'base64']
+    # 需要监控的原生方法
+    native_methods: ['atob', 'btoa', 'eval', 'Function', 'setTimeout', 'setInterval']
+  # 网络请求监控
+  network_monitoring:
+    # 是否监控网络请求
+    enabled: true
+    # 需要捕获的请求头
+    capture_headers: ['authorization', 'token', 'signature', 'sign', 'x-token']
+    # 需要捕获的请求参数
+    capture_params: ['password', 'pass', 'pwd', 'token', 'key', 'secret']
+  # 事件监控
+  event_monitoring:
+    # 监控的事件类型
+    event_types: ['click', 'submit', 'input', 'change', 'keydown', 'keyup']
+    # 深度分析的事件
+    deep_analysis_events: ['click', 'submit']
+  # 输出配置
+  output:
+    # 是否保存逆向分析报告
+    save_reports: true
+    # 报告保存目录
+    report_dir: "./reports/js_reverse"
+    # 是否保存捕获的脚本
+    save_scripts: true
+    # 脚本保存目录
+    script_dir: "./reports/js_reverse/scripts"

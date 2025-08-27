@@ -10,10 +10,12 @@ from asyncio import Queue, Semaphore, Task
 from src.prompts.prompt import get_agent_reasoning_prompt
 from src.tools import browser_tools, auth_tools
 from src.tools.network_tools import NetworkSniffer
-from src.sast_tools import secret_scanner, xss_scanner, crypto_detector
+from src.sast_tools import secret_scanner, xss_scanner
+from src.utils.unified_crypto_analyzer import UnifiedCryptoAnalyzer
 from src.utils.browser_pool import BrowserPool
 from src.utils.ai_logger import log_ai_dialogue
 from src.utils.fingerprinter import get_preliminary_fingerprint
+from src.utils.parallel_executor import ParallelTaskExecutor, SmartParallelOrchestrator
 from src.models.shared_state import SharedState
 
 class AgentWorker:
@@ -46,6 +48,14 @@ class AgentWorker:
         
         llm_config = self.config['llm_service']
         self.llm_client = AsyncOpenAI(base_url=llm_config['api_config']['base_url'], api_key=llm_config['api_config']['api_key'])
+        
+        # 初始化统一的加密分析器
+        self.crypto_analyzer = UnifiedCryptoAnalyzer(self.config)
+        
+        # 并行测试相关
+        self.parallel_pages = []
+        self.parallel_executor = None
+        self.orchestrator = SmartParallelOrchestrator(self)
 
     async def _load_js_hooks(self):
         try:
@@ -185,6 +195,12 @@ class AgentWorker:
         contexts = []
         try:
             main_page = await self._setup_autonomous_pages(contexts)
+            
+            # 初始化并行执行器
+            if len(self.parallel_pages) > 1:
+                self.parallel_executor = ParallelTaskExecutor(self.parallel_pages, self.config)
+                self.logger.info(f"已初始化并行执行器，可使用 {len(self.parallel_pages)} 个影子浏览器")
+            
             recon_snapshot = await self._initial_reconnaissance(main_page)
             self.logger.info("初始侦察完成。进入行动循环。" )
 
@@ -192,7 +208,25 @@ class AgentWorker:
             network_analysis_history = []
             for step in range(self.max_steps):
                 self.logger.info(f"--- [行动步骤 {step+1}/{self.max_steps}] ---")
-                prompt = self._build_reasoning_prompt(history, recon_snapshot, network_analysis_history)
+                
+                # 如果有多个浏览器，考虑并行任务
+                if self.parallel_executor and len(self.parallel_pages) > 1:
+                    # 检查是否需要执行并行任务
+                    parallel_decision = await self._check_parallel_opportunity(recon_snapshot)
+                    if parallel_decision.get('execute_parallel', False):
+                        self.logger.info("执行并行测试任务...")
+                        parallel_results = await self._execute_parallel_tasks(parallel_decision)
+                        # 将并行结果加入历史
+                        history.append({
+                            'type': 'parallel_execution',
+                            'results': parallel_results,
+                            'timestamp': asyncio.get_event_loop().time()
+                        })
+                        continue
+                
+                # 单步推理和执行
+                parallel_mode = len(self.parallel_pages) > 1
+                prompt = self._build_reasoning_prompt(history, recon_snapshot, network_analysis_history, parallel_mode=parallel_mode)
                 ai_decision = await self._call_llm(prompt)
                 thought = ai_decision.get('thought', '')
                 tool_call = ai_decision.get('tool_call')
@@ -223,9 +257,21 @@ class AgentWorker:
             self.on_complete(self.start_url)
 
     async def _setup_autonomous_pages(self, contexts: list) -> Page:
-        max_parallel = min(3, self.browser_pool.pool_size)
+        # 动态确定并行浏览器数量
+        execution_mode = self.config.get('investigation_manager', {}).get('execution_mode', 'autonomous')
+        
+        if execution_mode == 'autonomous':
+            # 在自主模式下，让AI决定需要多少个并行浏览器
+            # 默认使用最小值：2个，但不超过池大小
+            max_parallel = min(2, self.browser_pool.pool_size)
+        else:
+            # 其他模式使用固定数量
+            max_parallel = min(3, self.browser_pool.pool_size)
+        
+        self.logger.info(f"设置 {max_parallel} 个并行浏览器进行测试")
+        
         pages = []
-        for _ in range(max_parallel):
+        for i in range(max_parallel):
             context = await self.browser_pool.acquire()
             page = await context.new_page()
             contexts.append(context)
@@ -234,14 +280,30 @@ class AgentWorker:
             if self.auth_state:
                 await auth_tools.inject_auth_state(page, self.auth_state)
             await browser_tools.navigate(page, self.start_url)
+            
+            # 为每个页面设置唯一标识
+            await page.evaluate(f"""() => {{
+                window.shadowBrowserId = {i+1};
+                console.log('Shadow Browser {i+1} initialized');
+            }}""")
+        
+        self.parallel_pages = pages  # 保存引用供后续使用
         return pages[0]
 
     async def _initial_reconnaissance(self, page: Page) -> dict:
         page_content = await browser_tools.get_web_content(page)
+        
+        # 使用统一的加密分析器
+        crypto_findings = await self.crypto_analyzer.analyze_crypto(
+            code=page_content,
+            context={'url': page.url},
+            analysis_modes=['static']
+        )
+        
         sast_results = {
             'secrets': secret_scanner.find_secrets(page_content),
             'xss_sinks': xss_scanner.find_xss_sinks(page_content),
-            'crypto': crypto_detector.detect_crypto_patterns(page_content)
+            'crypto': [f.__dict__ for f in crypto_findings]  # 转换为字典格式
         }
         return {
             "url": page.url,
@@ -251,7 +313,7 @@ class AgentWorker:
             "sast_results": sast_results
         }
 
-    def _build_reasoning_prompt(self, history, recon, net_history) -> str:
+    def _build_reasoning_prompt(self, history, recon, net_history, parallel_mode=False) -> str:
         current_observation = f"当前页面状态:\n- URL: {recon.get('url', self.start_url)}\n- 标题: {recon.get('title', 'N/A')}\n"
         current_observation += f"侦察快照:\n{json.dumps(recon.get('interactive_elements'), ensure_ascii=False, indent=2)}"
         
@@ -265,7 +327,9 @@ class AgentWorker:
             iast_findings=self.iast_findings,
             network_analysis=net_history[-1] if net_history else None,
             long_term_memories=[],
-            reasoning_level=reasoning_level
+            reasoning_level=reasoning_level,
+            parallel_mode=parallel_mode,
+            available_browsers=len(self.parallel_pages) if parallel_mode else 1
         )
         self.iast_findings.clear()
         return prompt
@@ -279,6 +343,10 @@ class AgentWorker:
             self.final_findings.append(tool_args)
             return f"发现已记录: {tool_args.get('vulnerability')}"
         
+        # JS逆向工具
+        elif tool_name in ['analyze_js_crypto', 'detect_crypto_functions', 'analyze_network_crypto']:
+            return await self._execute_js_reverse_tool(page, tool_name, tool_args)
+        
         tool_function = getattr(browser_tools, tool_name, None)
         if tool_function:
             try:
@@ -286,3 +354,174 @@ class AgentWorker:
             except TypeError as e:
                 return f"工具调用错误: {str(e)}"
         return f"错误：不存在名为 '{tool_name}' 的工具。"
+
+    async def _execute_js_reverse_tool(self, page: Page, tool_name: str, tool_args: dict) -> str:
+        """执行JS逆向相关工具"""
+        from src.prompts.js_analysis_prompts import get_js_analysis_prompt, get_js_crypto_detection_prompt, get_network_crypto_analysis_prompt
+        
+        try:
+            if tool_name == 'analyze_js_crypto':
+                # 获取当前页面的JS上下文
+                js_context = await page.evaluate("""
+                    () => {
+                        // 获取当前函数的上下文
+                        const error = new Error();
+                        const stack = error.stack || '';
+                        const lines = stack.split('\\n');
+                        const functionCalls = [];
+                        
+                        for (let i = 3; i < Math.min(lines.length, 8); i++) {
+                            const match = lines[i].match(/at\\s+(.+?)\\s+\\((.+?):(\\d+):(\\d+)\\)/);
+                            if (match) {
+                                functionCalls.push(match[1]);
+                            }
+                        }
+                        
+                        return {
+                            url: window.location.href,
+                            functionCalls: functionCalls,
+                            source: document.documentElement.outerHTML
+                        };
+                    }
+                """)
+                
+                # 构建分析提示词
+                prompt = get_js_analysis_prompt(
+                    code_context=js_context.get('source', ''),
+                    variables={},
+                    url=js_context.get('url', page.url),
+                    function_name=tool_args.get('function_name', ''),
+                    call_stack=js_context.get('functionCalls', []),
+                    reasoning_level=self.config.get('llm_service', {}).get('reasoning_level', 'medium')
+                )
+                
+                # 发送给LLM分析
+                response = await self.llm_client.send_message(prompt)
+                
+                # 尝试解析JSON响应
+                try:
+                    import json
+                    result = json.loads(response)
+                    if result.get('analysis') == '无关':
+                        return "未发现相关的加密或安全机制"
+                    
+                    # 格式化分析结果
+                    findings = result.get('findings', [])
+                    summary = f"JS逆向分析完成。发现 {len(findings)} 个相关点：\n"
+                    for finding in findings[:3]:  # 限制显示数量
+                        summary += f"- {finding.get('type', '未知')}: {finding.get('description', '')[:100]}...\n"
+                    
+                    return summary
+                except:
+                    return f"JS逆向分析结果：{response[:500]}..."
+                    
+            elif tool_name == 'detect_crypto_functions':
+                # 获取页面源码
+                page_source = await page.content()
+                
+                prompt = get_js_crypto_detection_prompt(
+                    page_source=page_source,
+                    url=page.url,
+                    reasoning_level=self.config.get('llm_service', {}).get('reasoning_level', 'medium')
+                )
+                
+                response = await self.llm_client.send_message(prompt)
+                
+                try:
+                    import json
+                    result = json.loads(response)
+                    functions = result.get('crypto_functions', [])
+                    if functions:
+                        summary = f"检测到 {len(functions)} 个加密相关函数：\n"
+                        for func in functions[:5]:  # 限制显示数量
+                            summary += f"- {func.get('name')} ({func.get('type')}) - {func.get('confidence')} 置信度\n"
+                        return summary
+                    else:
+                        return "未检测到加密相关函数"
+                except:
+                    return f"加密函数检测结果：{response[:300]}..."
+                    
+            elif tool_name == 'analyze_network_crypto':
+                # 获取网络请求数据
+                # 这里需要从网络数据队列中获取相关信息
+                network_data = []
+                
+                prompt = get_network_crypto_analysis_prompt(
+                    requests=network_data,
+                    url=page.url
+                )
+                
+                response = await self.llm_client.send_message(prompt)
+                
+                try:
+                    import json
+                    result = json.loads(response)
+                    issues = result.get('security_issues', [])
+                    if issues:
+                        summary = f"网络加密分析发现 {len(issues)} 个安全问题：\n"
+                        for issue in issues:
+                            summary += f"- [{issue.get('severity')}] {issue.get('description')}\n"
+                        return summary
+                    else:
+                        return "网络加密分析未发现明显安全问题"
+                except:
+                    return f"网络加密分析结果：{response[:300]}..."
+                    
+        except Exception as e:
+            self.logger.error(f"JS逆向工具执行失败: {e}")
+            return f"JS逆向分析失败: {str(e)}"
+
+    async def _check_parallel_opportunity(self, recon_snapshot: Dict) -> Dict[str, Any]:
+        """检查是否存在并行测试机会"""
+        if not self.orchestrator or len(self.parallel_pages) <= 1:
+            return {'execute_parallel': False}
+        
+        # 分析页面内容，寻找并行测试机会
+        page_analysis = {
+            'url': self.start_url,
+            'title': recon_snapshot.get('title', ''),
+            'content_preview': recon_snapshot.get('content', '')[:1000],
+            'forms': recon_snapshot.get('forms', []),
+            'links': recon_snapshot.get('links', []),
+            'buttons': recon_snapshot.get('interactive_elements', [])
+        }
+        
+        # 让AI决定是否需要并行测试
+        strategy = await self.orchestrator.create_parallel_strategy(
+            page_analysis, 
+            len(self.parallel_pages)
+        )
+        
+        # 如果有并行任务，返回执行决策
+        if strategy.get('parallel_tasks'):
+            return {
+                'execute_parallel': True,
+                'strategy': strategy,
+                'available_browsers': len(self.parallel_pages)
+            }
+        
+        return {'execute_parallel': False}
+
+    async def _execute_parallel_tasks(self, decision: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """执行并行任务"""
+        if not self.parallel_executor:
+            return []
+        
+        strategy = decision.get('strategy', {})
+        parallel_tasks = strategy.get('parallel_tasks', [])
+        
+        if not parallel_tasks:
+            return []
+        
+        # 执行并行任务
+        results = await self.parallel_executor.execute_parallel_tasks(parallel_tasks)
+        
+        self.logger.info(f"并行执行完成，共 {len(results)} 个结果")
+        
+        # 分析结果，寻找安全漏洞
+        for result in results:
+            if result.get('success'):
+                # 这里可以添加特定的安全检查逻辑
+                pass
+        
+        return results

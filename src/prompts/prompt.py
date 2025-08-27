@@ -37,6 +37,21 @@ AVAILABLE_TOOLS = {
     "finish_investigation": {
         "description": "当你认为对当前页面的所有功能点和线索的测试都已充分完成时，调用此工具来结束调查。",
         "args": {"summary": "(string) 总结你的发现和调查结论。"}
+    },
+    "analyze_js_crypto": {
+        "description": "当检测到加密函数或需要分析JavaScript代码的安全机制时使用此工具。",
+        "args": {
+            "function_name": "(string, optional) 要分析的函数名",
+            "focus": "(string) 分析重点：'algorithm'（算法识别）、'security'（安全机制）、'vulnerability'（漏洞检测）或 'comprehensive'（综合分析）"
+        }
+    },
+    "detect_crypto_functions": {
+        "description": "扫描当前页面查找所有加密和安全相关的JavaScript函数。",
+        "args": {}
+    },
+    "analyze_network_crypto": {
+        "description": "分析网络请求中的加密数据传输模式。",
+        "args": {}
     }
 }
 
@@ -141,7 +156,7 @@ def get_interaction_analysis_prompt(interaction_type: str, snapshot: Dict[str, A
     
     return "\n".join(prompt_lines)
 
-def get_agent_reasoning_prompt(goal: str, history: List[Dict[str, Any]], observation: str, sast_results: Dict[str, List[str]], iast_findings: List[Dict[str, str]], network_analysis: Optional[Dict[str, Any]], long_term_memories: List[str], reasoning_level: str = 'high') -> str:
+def get_agent_reasoning_prompt(goal: str, history: List[Dict[str, Any]], observation: str, sast_results: Dict[str, List[str]], iast_findings: List[Dict[str, str]], network_analysis: Optional[Dict[str, Any]], long_term_memories: List[str], reasoning_level: str = 'high', parallel_mode: bool = False, available_browsers: int = 1) -> str:
     """
     构建一个提示词，用于驱动“AI指挥官”进行思考和决策。
     """
@@ -154,13 +169,32 @@ def get_agent_reasoning_prompt(goal: str, history: List[Dict[str, Any]], observa
                 tools_description += f"    - `{arg_name}`: {arg_desc}\n"
 
     prompt_lines = [
-        "你是一名顶级的安全测试总指挥。",
+        "你是一名顶级的安全测试总指挥，具备JavaScript逆向工程和加密分析能力。",
         f"**总任务目标**: {goal}",
         "",
+    ]
+    
+    # 添加并行测试信息
+    if parallel_mode and available_browsers > 1:
+        prompt_lines.extend([
+            f"**🚀 并行测试模式**: 你当前可以控制 {available_browsers} 个影子浏览器同时进行测试！",
+            "- 你可以设计并行测试策略，同时测试多个功能点",
+            "- 例如：一个浏览器测试登录，另一个测试注册；或同时测试不同的表单",
+            "- 系统会自动分配任务到不同的浏览器",
+            "",
+        ])
+    
+    prompt_lines.extend([
         "**可用交互工具清单**:",
         tools_description,
         "",
-    ]
+        "**JS逆向分析能力**:",
+        "- 你具备JavaScript加密分析和逆向工程能力",
+        "- 使用 `analyze_js_crypto` 深入分析加密函数",
+        "- 使用 `detect_crypto_functions` 扫描页面中的所有加密相关函数",
+        "- 使用 `analyze_network_crypto` 分析网络加密传输",
+        "",
+    ])
 
     if reasoning_level in ['medium', 'high']:
         if history:
@@ -206,9 +240,15 @@ def get_agent_reasoning_prompt(goal: str, history: List[Dict[str, Any]], observa
         "1.  **思考**: 基于当前所有情报，用一句话总结下一步测试思路。",
         "2.  **决策**: 从工具清单中选择一个工具来执行。",
         "",
+        "**JS逆向触发条件**:",
+        "- 当发现加密函数名（encrypt/decrypt/hash等）时，使用JS逆向工具分析",
+        "- 当检测到混淆的JavaScript代码时，使用JS逆向工具分析",
+        "- 当发现网络请求中有加密数据时，分析加密模式",
+        "- 当IAST检测到危险函数调用时，深入分析相关代码",
+        "",
         "**输出要求**: 你的回答**必须**是JSON对象，包含 `thought` 和 `tool_call` 两个键。",
         "**JSON输出示例**: ",
-        '```json\n{ "thought": "点击注册按钮探索功能", "tool_call": { "name": "click_element", "args": { "selector": "[data-aegis-id=\"aegis-el-7\"]" } } }\n```',
+        '```json\n{ "thought": "检测到加密函数，使用JS逆向分析", "tool_call": { "name": "analyze_js_crypto", "args": { "function_name": "encryptData" } } }\n```',
         "**关键指令**: 你的整个回复**必须**仅仅是JSON对象，不包含任何其他文本。",
     ])
 

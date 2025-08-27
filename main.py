@@ -20,13 +20,19 @@ from src.queues.queues import (
     controller_status_q
 )
 
+# 创建JS逆向专用队列
+from asyncio import Queue
+js_hook_events_q = Queue()
+network_data_q = Queue()
+
 # 导入组件
 from src.controller.cdp_controller import CDPController
-from src.controller.cdp_debugger import CDPDebugger
+from src.controller.unified_cdp_debugger import UnifiedCDPDebugger
 from src.workers.investigation_manager import InvestigationManager
 from src.workers.broadcaster import Broadcaster
 from src.workers.reporter_worker import ReporterWorker
 from src.workers.memory_worker import MemoryWorker
+from src.workers.js_reverse_worker import JSReverseWorker
 
 async def main():
     """
@@ -72,14 +78,33 @@ async def main():
         logging.info("调查管理器和浏览器池初始化成功。")
 
         scout = CDPController(output_q=navigation_q, config=config)
-        debugger = CDPDebugger(output_q=debug_events_q, config=config, playwright=playwright)
+        debugger = UnifiedCDPDebugger(
+            output_q=debug_events_q, 
+            config=config, 
+            network_data_q=network_data_q, 
+            js_hook_events_q=js_hook_events_q
+        )
         broadcaster = Broadcaster(input_q=ai_output_q, output_queues=[reporter_q, memory_q])
         reporter = ReporterWorker(input_q=reporter_q, config=config)
         memory = MemoryWorker(input_q=memory_q, config=config)
+        
+        # 初始化JS逆向工作器（如果启用）
+        js_reverse_worker = None
+        if config.get('js_reverse', {}).get('enabled', False):
+            js_reverse_worker = JSReverseWorker(
+                config=config,
+                debug_q=debug_events_q,
+                js_hook_events_q=js_hook_events_q,
+                network_data_q=network_data_q
+            )
+            running_tasks.append(
+                asyncio.create_task(js_reverse_worker.run(), name="JSReverseWorker")
+            )
+            logging.info("JS逆向功能已启用。")
 
         running_tasks.extend([
             asyncio.create_task(scout.run(browser), name="CDPScout"),
-            asyncio.create_task(debugger.run(browser), name="CDPDebugger"),
+            asyncio.create_task(debugger.run(browser), name="UnifiedCDPDebugger"),
             asyncio.create_task(manager.run(), name="InvestigationManager"),
             asyncio.create_task(broadcaster.run(), name="Broadcaster"),
             asyncio.create_task(reporter.run(), name="ReporterWorker"),

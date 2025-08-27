@@ -693,7 +693,7 @@ AI模型本身是“无状态”的，它无法像人类一样“记住”一个
 
 - **`CDPController`**: 捕获到`click`事件，标记上ICID。
 - **`CDPDebugger`**: 在接下来的几百毫秒内，可能会因为JS执行而触发多次`Debugger.paused`事件（例如，`login()` -> `validate()` -> `encrypt()`），**每一次暂停**事件都会被标记上**同一个ICID**。
-- **`js_hooks.js` (IAST)**: 如果`innerHTML`或`eval`等危险函数被调用，探针会上报一个安全警报，这个警报也会被标记上同一个ICID。
+- **`unified_hooks.js` (IAST+JS逆向)**: 如果`innerHTML`或`eval`等危险函数被调用，或者加密函数被执行，探针会上报一个安全警报，这个警报也会被标记上同一个ICID。
 - **网络监听器**: 所有在这期间发出的网络请求（`Network.requestWillBeSent`），同样被标记上ICID。
 
 所有这些被标记的、类型各异的原始事件，都被统一扔进一个原始事件队列中。

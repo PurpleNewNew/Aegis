@@ -97,24 +97,60 @@ class CDPController:
                 if not page.is_closed() and self._is_in_whitelist(page.url):
                     try:
                         auth_state = await auth_tools.extract_full_auth_state(page)
-                        event_data = {
-                            'event_type': 'user_interaction',
-                            'url': page.url,
-                            'interaction_type': interaction_data.get('type'),
-                            'element_info': {
-                                'selector': interaction_data.get('selector'),
-                                'tag': interaction_data.get('tag'),
-                                'text': interaction_data.get('text', '')[:50],
-                            },
-                            'auth_state': auth_state,
-                            'timestamp': asyncio.get_event_loop().time()
-                        }
-                        self.logger.info(f"侦察到用户交互: {event_data.get('interaction_type')} on {event_data.get('element_info', {}).get('selector')}")
+                        
+                        # 检查是否是完整的交互序列（来自新的录制器）
+                        if 'sequence' in interaction_data:
+                            # 处理完整序列
+                            event_data = {
+                                'event_type': 'interaction_sequence',
+                                'url': page.url,
+                                'sequence': interaction_data['sequence'],
+                                'sequence_type': interaction_data.get('type', 'partial'),
+                                'auth_state': auth_state,
+                                'timestamp': asyncio.get_event_loop().time()
+                            }
+                        else:
+                            # 处理单个交互（兼容旧格式）
+                            event_data = {
+                                'event_type': 'user_interaction',
+                                'url': page.url,
+                                'interaction_type': interaction_data.get('type'),
+                                'element_info': {
+                                    'selector': interaction_data.get('selector'),
+                                    'tag': interaction_data.get('tag'),
+                                    'text': interaction_data.get('text', '')[:50],
+                                    'value': interaction_data.get('value', ''),
+                                },
+                                'details': interaction_data.get('details', {}),
+                                'auth_state': auth_state,
+                                'timestamp': asyncio.get_event_loop().time()
+                            }
+                        
+                        self.logger.info(f"侦察到用户交互: {event_data.get('interaction_type', 'sequence')} on {event_data.get('element_info', {}).get('selector', 'N/A')}")
                         await self.output_q.put(event_data)
                     except Exception as e:
                         self.logger.warning(f"处理用户交互事件时出错（页面可能已关闭）。错误: {repr(e)}，收到的数据: {interaction_data}", exc_info=True)
 
             await page.expose_function("onUserInteraction", on_user_interaction)
+            await page.expose_function("__aegis_report_interaction__", on_user_interaction)
+
+            # 注入统一的钩子脚本（包含IAST和JS逆向功能）
+            try:
+                with open('src/tools/unified_hooks.js', 'r', encoding='utf-8') as f:
+                    unified_script = f.read()
+                await page.add_init_script(unified_script)
+                self.logger.info("已注入统一的钩子脚本")
+            except Exception as e:
+                self.logger.error(f"注入统一钩子脚本失败: {e}")
+            
+            # 注入增强的交互录制器
+            try:
+                with open('src/tools/interaction_recorder.js', 'r', encoding='utf-8') as f:
+                    recorder_script = f.read()
+                await page.add_init_script(recorder_script)
+                self.logger.info("已注入增强的交互录制器")
+            except Exception as e:
+                self.logger.error(f"注入交互录制器失败: {e}")
 
             await page.add_init_script(r"""(function() {
                 function getCssSelector(el) {

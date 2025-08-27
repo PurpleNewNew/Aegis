@@ -1,0 +1,3 @@
+"""
+Passive mode interaction tests
+"""
