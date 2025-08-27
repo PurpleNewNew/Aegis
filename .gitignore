@@ -4,4 +4,5 @@ chroma_db/
 logs/
 reports/
 Gemini.md
+CLAUDE.md
 **/*.pyc
