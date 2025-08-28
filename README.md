@@ -72,26 +72,26 @@ graph TD
 
 ```mermaid
 graph TD
-    subgraph 启动 (Initiation)
+    subgraph "启动 (Initiation)"
         direction LR
-        InvestigationManager[🕵️ 调查任务管理器] -- 1. 分配任务和目标URL --> AgentWorker_Active(🤖 AgentWorker)
+        InvestigationManager["🕵️ 调查任务管理器"] -- "1. 分配任务和目标URL" --> AgentWorker_Active["🤖 AgentWorker"]
     end
 
-    subgraph "AI代理的“思考-行动”循环"
+    subgraph "AI代理的思考-行动循环"
         direction TB
-        AgentWorker_Active -- 2. 获取浏览器 --> BrowserPool[(🕶️ 浏览器池)]
-        AgentWorker_Active -- 3. 观察 (Observe) --> Page(页面状态)
-        Page -- 4. 形成上下文 --> AgentWorker_Active
-        AgentWorker_Active -- 5. 思考 (Think) --> LLM[(LLM 决策)]
-        LLM -- 6. 返回工具调用 --> AgentWorker_Active
-        AgentWorker_Active -- 7. 行动 (Act) --> Tools(🛠️ 执行工具<br>如: browser_tools, scanners)
-        Tools -- 8. 更新页面状态 --> Page
+        AgentWorker_Active -- "2. 获取浏览器" --> BrowserPool["🕶️ 浏览器池"]
+        AgentWorker_Active -- "3. 观察 (Observe)" --> Page["页面状态"]
+        Page -- "4. 形成上下文" --> AgentWorker_Active
+        AgentWorker_Active -- "5. 思考 (Think)" --> LLM["LLM 决策"]
+        LLM -- "6. 返回工具调用" --> AgentWorker_Active
+        AgentWorker_Active -- "7. 行动 (Act)" --> Tools["🛠️ 执行工具<br>如: browser_tools, scanners"]
+        Tools -- "8. 更新页面状态" --> Page
         subgraph "持续情报"
-            Debugger(CDP 调试器) -- IAST事件 --> AgentWorker_Active
+            Debugger["CDP 调试器"] -- "IAST事件" --> AgentWorker_Active
         end
     end
 
-    AgentWorker_Active -- 9. 结束并报告 --> Reporter(📋 报告生成)
+    AgentWorker_Active -- "9. 结束并报告" --> Reporter["📋 报告生成"]
 
     classDef manager fill:#FEF9E7,stroke:#F1C40F,stroke-width:2px
     classDef agent fill:#E8F8F5,stroke:#16A085,stroke-width:2px
