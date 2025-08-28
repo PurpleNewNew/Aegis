@@ -38,25 +38,25 @@ Aegis的核心是双模驱动架构，不同模式下，各组件的协同方式
 
 ```mermaid
 graph TD
-    subgraph 用户侧 (User Side)
+    subgraph "用户侧 (User Side)"
         direction LR
-        User[👤 用户] -- 1. 正常操作 --> MainBrowser(🌐 主浏览器)
-        MainBrowser -- 2. 交互事件 --> CDPController(CDP 控制器)
-        CDPController -- 3. 事件入队 --> InteractionQueue(交互事件队列)
+        User["👤 用户"] -- "1. 正常操作" --> MainBrowser["🌐 主浏览器"]
+        MainBrowser -- "2. 交互事件" --> CDPController["CDP 控制器"]
+        CDPController -- "3. 事件入队" --> InteractionQueue["交互事件队列"]
     end
 
-    subgraph 调度与分析 (Manager & Analysis)
+    subgraph "调度与分析 (Manager & Analysis)"
         direction TB
-        InvestigationManager[🕵️ 调查任务管理器] -- 4. 读取交互 --> InteractionQueue
-        InvestigationManager -- 5. 聚合后派发分析任务 --> InteractionWorker(👩‍🔬 交互分析器)
-        InteractionWorker -- 6. 获取已登录的浏览器 --> BrowserPool[(🕶️ 浏览器池)]
-        InteractionWorker -- 7. 在后台重放并分析 --> AnalysisLoop{分析循环}
-        AnalysisLoop -- 8. 输出报告 --> Reporter(📋 报告生成)
+        InvestigationManager["🕵️ 调查任务管理器"] -- "4. 读取交互" --> InteractionQueue
+        InvestigationManager -- "5. 聚合后派发分析任务" --> InteractionWorker["👩‍🔬 交互分析器"]
+        InteractionWorker -- "6. 获取已登录的浏览器" --> BrowserPool["🕶️ 浏览器池"]
+        InteractionWorker -- "7. 在后台重放并分析" --> AnalysisLoop{"分析循环"}
+        AnalysisLoop -- "8. 输出报告" --> Reporter["📋 报告生成"]
     end
 
-    subgraph 会话保持 (Session Holder)
+    subgraph "会话保持 (Session Holder)"
         direction TB
-        AgentWorker_Passive[🤖 AgentWorker <br>(会话保持模式)] -- "a. 登录并准备好环境" --> BrowserPool
+        AgentWorker_Passive["🤖 AgentWorker<br>(会话保持模式)"] -- "a. 登录并准备好环境" --> BrowserPool
         InvestigationManager -- "b. (可选)启动会话保持" --> AgentWorker_Passive
     end
 
