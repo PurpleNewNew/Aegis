@@ -62,8 +62,8 @@ graph TD
 
     classDef user fill:#E8F8F5,stroke:#16A085,stroke-width:2px
     classDef manager fill:#FEF9E7,stroke:#F1C40F,stroke-width:2px
-    class User, MainBrowser, CDPController, InteractionQueue user
-    class InvestigationManager, InteractionWorker, BrowserPool, AnalysisLoop, Reporter, AgentWorker_Passive manager
+    class User,MainBrowser,CDPController,InteractionQueue user
+    class InvestigationManager,InteractionWorker,BrowserPool,AnalysisLoop,Reporter,AgentWorker_Passive manager
 ```
 
 ### 主动模式 (Autonomous Mode) 工作流
@@ -95,8 +95,8 @@ graph TD
 
     classDef manager fill:#FEF9E7,stroke:#F1C40F,stroke-width:2px
     classDef agent fill:#E8F8F5,stroke:#16A085,stroke-width:2px
-    class InvestigationManager, BrowserPool, Reporter manager
-    class AgentWorker_Active, Page, LLM, Tools, Debugger agent
+    class InvestigationManager,BrowserPool,Reporter manager
+    class AgentWorker_Active,Page,LLM,Tools,Debugger agent
 ```
 
 ## 安装与使用
